@@ -8,14 +8,16 @@ from pydantic import BaseModel, Field, EmailStr, field_validator, constr, Config
 from argon2 import PasswordHasher
 from typing import Optional, Dict, Any, List, Set, Union, Generic, TypeVar
 from datetime import datetime, timedelta
+from string import ascii_letters, digits
 from enum import Enum
 
 import re
 import uuid
-from string import ascii_letters, digits
 import secrets
 
 import logging
+
+logger = logging.getLogger(__name__)
 
 class UserRole(str, Enum):
     """用户角色枚举"""

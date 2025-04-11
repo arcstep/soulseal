@@ -9,7 +9,7 @@ from enum import Enum
 from voidring import IndexedRocksDB
 from .http import handle_errors, HttpMethod
 from .models import User, UserRole, Result
-from .tokens import TokensManager, TokenClaims
+from .tokens import TokensManager, TokenClaims, TokenBlacklist
 from .users import UsersManager
 
 def _set_auth_cookies(response: Response, access_token: str, logger: logging.Logger) -> None:
@@ -98,6 +98,7 @@ def create_auth_endpoints(
     app: FastAPI,
     tokens_manager: TokensManager = None,
     users_manager: UsersManager = None,
+    token_blacklist: TokenBlacklist = None,
     prefix: str="/api",
     logger: logging.Logger = None
 ) -> Dict[str, Tuple[HttpMethod, str, Callable]]:
@@ -254,20 +255,18 @@ def create_auth_endpoints(
         """退出在设备上的登录"""
         logger.debug(f"要注销的用户信息: {token_claims}")
 
-        # 撤销当前设备的访问令牌
+        # 撤销当前设备的刷新令牌
         tokens_manager.revoke_refresh_token(
             user_id=token_claims['user_id'],
             device_id=token_claims['device_id']
         )
-        logger.debug(f"撤销当前设备的刷新令牌: {token_claims['user_id']}, {token_claims['device_id']}")
-
-        # 撤销当前设备的访问令牌
+        
+        # 撤销当前设备的访问令牌 - 加入黑名单
         tokens_manager.revoke_access_token(
             user_id=token_claims['user_id'],
             device_id=token_claims['device_id']
         )
-        logger.debug(f"撤销当前设备的访问令牌: {token_claims['user_id']}, {token_claims['device_id']}")
-
+        
         # 删除当前设备的cookie
         _set_auth_cookies(response, access_token=None, logger=logger)
 
@@ -337,6 +336,26 @@ def create_auth_endpoints(
                 detail=result.error
             )
 
+    @handle_errors()
+    async def check_blacklist(token_data: Dict[str, Any]):
+        """检查令牌是否在黑名单中"""
+        # 确保提供了必要字段
+        user_id = token_data.get("user_id")
+        device_id = token_data.get("device_id")
+        
+        if not user_id or not device_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="缺少必要的user_id或device_id字段"
+            )
+        
+        # 直接使用user_id和device_id组合作为黑名单键
+        token_id = f"{user_id}:{device_id}"
+        
+        # 检查是否在黑名单中
+        is_blacklisted = token_blacklist.contains(token_id)
+        return {"is_blacklisted": is_blacklisted}
+    
     return [
         (HttpMethod.POST, f"{prefix}/auth/register", register),
         (HttpMethod.POST, f"{prefix}/auth/login", login),
@@ -344,5 +363,5 @@ def create_auth_endpoints(
         (HttpMethod.POST, f"{prefix}/auth/change-password", change_password),
         (HttpMethod.POST, f"{prefix}/auth/profile", update_user_profile),
         (HttpMethod.GET, f"{prefix}/auth/profile", get_user_profile),
+        (HttpMethod.POST, f"{prefix}/token/blacklist/check", check_blacklist)
     ]
-

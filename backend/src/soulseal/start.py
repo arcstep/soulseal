@@ -1,5 +1,5 @@
 from voidring import IndexedRocksDB
-from .tokens import TokensManager
+from .tokens import TokensManager, TokenBlacklist
 from .users import UsersManager
 from .endpoints import create_auth_endpoints
 from .__version__ import __version__
@@ -9,13 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-def mount_auth_api(app: FastAPI, prefix: str, tokens_manager: TokensManager, users_manager: UsersManager):
+def mount_auth_api(app: FastAPI, prefix: str, tokens_manager: TokensManager, users_manager: UsersManager, blacklist: TokenBlacklist):
     # 用户管理和认证路由
     auth_handlers = create_auth_endpoints(
         app=app,
         tokens_manager=tokens_manager,
         users_manager=users_manager,
-        prefix=prefix
+        prefix=prefix,
+        token_blacklist=blacklist
     )
     for (method, path, handler) in auth_handlers:
         app.add_api_route(
@@ -64,11 +65,13 @@ def create_app(
     db_path = Path(db_path)
     db_path.mkdir(parents=True, exist_ok=True)  # 创建db目录本身，而不仅是父目录
     db = IndexedRocksDB(str(db_path))
+    blacklist = TokenBlacklist()
 
-
-
-    tokens_manager = TokensManager(db)
+    # 将黑名单传递给令牌管理器
+    tokens_manager = TokensManager(db, blacklist)
     users_manager = UsersManager(db)
-    mount_auth_api(app, prefix, tokens_manager, users_manager)
+    
+    # 在挂载API时同样传递黑名单
+    mount_auth_api(app, prefix, tokens_manager, users_manager, blacklist)
 
     return app

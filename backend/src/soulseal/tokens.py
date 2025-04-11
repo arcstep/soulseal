@@ -10,8 +10,10 @@ from voidring import IndexedRocksDB, CachedRocksDB
 import os
 import jwt
 import logging
+import uuid
 
 from .models import Result
+from .token_sdk import TokenSDK, TokenClaims, TokenType, Result
 
 __JWT_SECRET_KEY__ = os.getenv("FASTAPI_SECRET_KEY", "MY-SECRET-KEY")
 __JWT_ALGORITHM__ = os.getenv("FASTAPI_ALGORITHM", "HS256")
@@ -90,26 +92,9 @@ class TokenClaims(BaseModel):
         )
 
 class TokensManager:
-    """令牌管理器，用于处理JWT令牌的创建、验证和管理。
+    """令牌管理器，使用TokenSDK处理访问令牌验证和白名单管理"""
     
-    该类提供了完整的JWT令牌管理解决方案，包括：
-    - JWT令牌的创建和验证
-    - 访问令牌和刷新令牌的生命周期管理
-    - 多设备登录支持
-    - 令牌撤销管理
-    
-    主要特性：
-    - 支持登陆验证和角色验证
-    - 基于JWT的双令牌认证系统
-    - 支持访问令牌失效时根据有效的刷新令牌自动刷新
-    - 支持在刷新令牌未过期时实现零登录
-    - 支持多设备同时登录
-    - 支持撤销在用设备的令牌
-    - 支持强制撤销所有设备的令牌
-    - 支持自动清理过期令牌
-    """
-    
-    def __init__(self, db: IndexedRocksDB):
+    def __init__(self, db: IndexedRocksDB, token_blacklist = None):
         """初始化认证管理器
 
         刷新令牌持久化保存在 rocksdb 中，访问令牌保存在内存中。
@@ -121,17 +106,16 @@ class TokensManager:
         # 刷新令牌持久化保存在数据库中
         self._cache = CachedRocksDB(db)
 
-        # 访问令牌在客户端和服务器端之间交换
-        # 生成过的访问令牌都保存在这个白名单中，但也可以通过撤销操作删除
-        # 白名单格式：
-        #   - 键为 user_id
-        #   - 值也是字典，每个元素的键是 device_id，值是 TokenClaims 结构
-        self._access_tokens: Dict[str, Dict[str, TokenClaims]] = {}
+        # 初始化令牌SDK
+        self._token_sdk = TokenSDK(
+            jwt_secret_key=__JWT_SECRET_KEY__,
+            jwt_algorithm=__JWT_ALGORITHM__,
+            access_token_expire_minutes=__ACCESS_TOKEN_EXPIRE_MINUTES__
+        )
 
-    def existing_access_token(self, user_id: str, device_id: str) -> bool:
-        """检查访问令牌是否存在"""
-        return self._access_tokens.get(user_id, {}).get(device_id, None) is not None
-    
+        # TokenBlacklist可以通过参数传入，便于共享和测试
+        self._token_blacklist = token_blacklist
+        
     def get_refresh_token(self, user_id: str, device_id: str) -> TokenClaims:
         """获取刷新令牌"""
         token_key = TokenClaims.get_refresh_token_key(user_id, device_id)
@@ -154,54 +138,22 @@ class TokensManager:
     
     def verify_access_token(self, token: str) -> Result[TokenClaims]:
         """验证 JWT 访问令牌，如果有必要就使用刷新令牌刷新"""
-        try:
+        result = self._token_sdk.verify_token(token)
+        
+        if result.is_fail() and "已过期" in result.error:
+            # 尝试使用刷新令牌
             unverified = jwt.decode(
-                token,
-                key=None,
+                token, key=None, 
                 options={'verify_signature': False, 'verify_exp': False}
             )
-            self._logger.debug(f"未验证的令牌: {unverified}")
-            user_id = unverified.get("user_id", None)
-            device_id = unverified.get("device_id", None)
-            if not user_id or not device_id:
-                return Result.fail("无效的令牌：缺少user_id或device_id")
-
-            try:
-                # 验证访问令牌
-                valid_data = jwt.decode(
-                    token,
-                    key=__JWT_SECRET_KEY__,
-                    algorithms=[__JWT_ALGORITHM__],
-                    options={
-                        'verify_signature': True,
-                        'verify_exp': True,
-                        'require': ['exp', 'iat'],
-                    }
-                )
-
-                # 白名单验证，确定是否撤销
-                if self.existing_access_token(user_id, device_id):
-                    self._logger.info(f"验证访问令牌: {valid_data}")
-                    valid_data["token_type"] = TokenType.ACCESS
-                    return Result.ok(data=valid_data)
-                else:
-                    return Result.fail("访问令牌已撤销")
-
-            except jwt.ExpiredSignatureError:
-                # 访问令牌验证失败，尝试使用刷新令牌刷新
-                self._logger.info(f"访问令牌验证失败，尝试使用刷新令牌刷新")
-                return self.refresh_access_token(
-                    user_id=unverified.get("user_id", None),
-                    username=unverified.get("username", None),
-                    roles=unverified.get("roles", None),
-                    device_id=unverified.get("device_id", None)
-                )
-
-            except Exception as e:
-                return Result.fail(f"令牌验证错误: {str(e)}")
-
-        except Exception as e:
-            return Result.fail(f"令牌验证错误: {str(e)}")
+            return self.refresh_access_token(
+                user_id=unverified.get("user_id", None),
+                username=unverified.get("username", None),
+                roles=unverified.get("roles", None),
+                device_id=unverified.get("device_id", None)
+            )
+        
+        return result
     
     def refresh_access_token(self, user_id: str, username: str, roles: List["UserRole"], device_id: str) -> Result[str]:
         """使用 Refresh-Token 刷新令牌颁发新的 Access-Token"""
@@ -243,18 +195,9 @@ class TokensManager:
 
     def _update_access_token(self, user_id: str, username: str, roles: List[str], device_id: str) -> TokenClaims:
         """更新内存中的访问令牌"""
-
-        # 生成新的访问令牌
-        claims = TokenClaims.create_access_token(user_id, username, roles, device_id)
-
-        # 更新访问令牌
-        if self._access_tokens.get(user_id, None):
-            self._access_tokens[user_id][device_id] = claims
-        else:
-            self._access_tokens[user_id] = {device_id: claims}
-        
-        # 返回更新后的令牌
-        return claims
+        token = self._token_sdk.create_and_register_token(user_id, username, roles, device_id)
+        # 转换为TokenClaims对象返回...
+        return TokenClaims(**jwt.decode(token, key=__JWT_SECRET_KEY__, algorithms=[__JWT_ALGORITHM__]))
 
     def revoke_refresh_token(self, user_id: str, device_id: str) -> None:
         """撤销数据库中的刷新令牌"""
@@ -266,9 +209,49 @@ class TokensManager:
             self._logger.info(f"刷新令牌已撤销: {token_key}")
     
     def revoke_access_token(self, user_id: str, device_id: str = None) -> None:
-        """撤销内存中的访问令牌"""
-        if device_id:
-            if self._access_tokens.get(user_id, None):
-                del self._access_tokens[user_id][device_id]
-        else:
-            del self._access_tokens[user_id]
+        """撤销访问令牌，加入黑名单"""
+        token_id = f"{user_id}:{device_id}" if device_id else user_id
+        # 默认一小时后过期
+        exp = datetime.utcnow() + timedelta(hours=1)
+        self._token_blacklist.add(token_id, exp)
+        self._logger.info(f"访问令牌已加入黑名单: {token_id}")
+
+class TokenBlacklist:
+    """基于内存的令牌黑名单"""
+    
+    def __init__(self):
+        self._blacklist = {}  # {token_id: 过期时间}
+        self._logger = logging.getLogger(__name__)
+        self._last_cleanup = datetime.utcnow()
+        self._cleanup_interval = timedelta(minutes=5)  # 每5分钟清理一次
+    
+    def add(self, token_id: str, expires_at: datetime) -> None:
+        """将令牌加入黑名单，并自动清理过期条目"""
+        self._blacklist[token_id] = expires_at
+        self._logger.info(f"令牌已加入黑名单: {token_id}, 过期时间: {expires_at}")
+        
+        # 检查是否需要清理
+        now = datetime.utcnow()
+        if now - self._last_cleanup > self._cleanup_interval:
+            self._cleanup()
+            self._last_cleanup = now
+    
+    def contains(self, token_id: str) -> bool:
+        """检查令牌是否在黑名单中"""
+        if token_id in self._blacklist:
+            # 检查是否已过期
+            if datetime.utcnow() > self._blacklist[token_id]:
+                del self._blacklist[token_id]
+                return False
+            return True
+        return False
+    
+    def _cleanup(self) -> None:
+        """清理过期的黑名单条目"""
+        now = datetime.utcnow()
+        expired_keys = [k for k, v in self._blacklist.items() if now > v]
+        
+        if expired_keys:
+            for k in expired_keys:
+                del self._blacklist[k]
+            self._logger.info(f"已清理 {len(expired_keys)} 个过期的黑名单条目")
