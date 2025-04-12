@@ -805,7 +805,8 @@ class TokenSDK:
     ) -> Callable[[Request, Response], Dict[str, Any]]:
         """创建一个强化的验证依赖，支持角色检查
         
-        与get_token_verify_dependency不同，此方法还支持角色验证
+        与get_token_verify_dependency不同，此方法还支持角色验证。
+        同时支持令牌自动刷新功能 - 当令牌过期时，尝试使用刷新令牌获取新的访问令牌。
         
         Args:
             require_roles: 要求的角色，如果提供，用户必须具备指定角色
@@ -826,9 +827,36 @@ class TokenSDK:
             
             verify_result = self.verify_token(token)
             if verify_result.is_fail():
-                error = f"令牌验证失败: {verify_result.error}"
-                logger.error(error)
-                raise HTTPException(status_code=401, detail=verify_result.error)
+                logger.info(f"令牌验证失败: {verify_result.error}，尝试刷新令牌")
+                
+                # 检查错误是否是令牌过期
+                if "过期" in verify_result.error:
+                    # 尝试刷新令牌
+                    refresh_result = self.handle_token_refresh(request, response)
+                    
+                    if refresh_result.is_ok():
+                        # 刷新成功，使用刷新后的令牌内容
+                        logger.info("令牌刷新成功，使用新令牌")
+                        token_claims = refresh_result.data
+                        
+                        # 检查角色权限
+                        if require_roles and not UserRole.has_role(require_roles, token_claims.get('roles', [])):
+                            raise HTTPException(
+                                status_code=403,
+                                detail="权限不足。需要指定的角色。"
+                            )
+                        
+                        return token_claims
+                    else:
+                        # 刷新失败
+                        error = f"令牌已过期且刷新失败: {refresh_result.error}"
+                        logger.error(error)
+                        raise HTTPException(status_code=401, detail=error)
+                else:
+                    # 其他验证错误
+                    error = f"令牌验证失败: {verify_result.error}"
+                    logger.error(error)
+                    raise HTTPException(status_code=401, detail=verify_result.error)
             
             token_claims = verify_result.data
             

@@ -9,6 +9,8 @@ import tempfile
 import shutil
 import requests
 import json
+from fastapi import HTTPException
+import pytest_asyncio
 
 from voidring import IndexedRocksDB
 from soulseal.tokens import TokensManager, TokenBlacklist, TokenSDK
@@ -811,13 +813,13 @@ class TestRemoteMode:
             device_id=user_data["device_id"]
         )
         
-        # 模拟远程API调用
-        with patch('requests.get') as mock_get:
+        # 模拟远程API调用 - 修正为post请求而不是get
+        with patch('requests.post') as mock_post:
             # 配置模拟响应
             mock_response = Mock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"in_blacklist": True}
-            mock_get.return_value = mock_response
+            mock_post.return_value = mock_response
             
             # 检查是否在黑名单中
             result = token_sdk_remote.is_blacklisted(
@@ -828,15 +830,15 @@ class TestRemoteMode:
             # 验证结果
             assert result is True
             
-            # 验证API调用 - 检查URL是否正确
-            url_called = mock_get.call_args[0][0]
-            expected_url_part = "/api/auth/blacklist-check"
+            # 验证API调用 - 检查URL和请求体
+            url_called = mock_post.call_args[0][0]
+            expected_url_part = "auth/blacklist/check"
             assert expected_url_part in url_called, f"URL应包含'{expected_url_part}'，实际为'{url_called}'"
             
-            # 验证params参数是否正确
-            params = mock_get.call_args[1]['params']
-            expected_token_id = f"{user_data['user_id']}:{user_data['device_id']}"
-            assert params.get('token_id') == expected_token_id
+            # 验证请求体中的数据而不是params
+            json_data = mock_post.call_args[1]['json']
+            assert json_data.get('user_id') == user_data['user_id']
+            assert json_data.get('device_id') == user_data['device_id']
     
     def test_remote_mode_expired_token(self, token_sdk_remote, user_data):
         """测试远程模式下验证过期令牌
@@ -877,3 +879,210 @@ class TestRemoteMode:
                 # 验证结果
                 assert result.is_fail(), "令牌应已过期，验证应失败"
                 assert "过期" in result.error, f"错误信息应包含'过期'，实际为：{result.error}" 
+
+
+class TestAuthDependency:
+    """测试TokenSDK的get_auth_dependency方法
+    
+    测试get_auth_dependency方法的功能：
+    - 令牌验证
+    - 角色访问控制
+    - 异常处理
+    """
+    
+    @pytest.mark.asyncio
+    async def test_auth_dependency_valid_token(self, token_sdk_with_manager, user_data):
+        """测试使用有效令牌的验证依赖
+        
+        验证get_auth_dependency返回的依赖能够:
+        1. 成功验证有效的访问令牌
+        2. 返回令牌声明数据
+        """
+        # 创建有效令牌
+        token = token_sdk_with_manager.create_token(
+            user_id=user_data["user_id"],
+            username=user_data["username"],
+            roles=user_data["roles"],
+            device_id=user_data["device_id"]
+        )
+        
+        # 创建模拟请求和响应
+        mock_request = MagicMock()
+        mock_request.cookies = {"access_token": token}
+        mock_response = MagicMock()
+        
+        # 获取验证依赖
+        auth_dependency = token_sdk_with_manager.get_auth_dependency()
+        
+        # 执行验证
+        result = await auth_dependency(mock_request, mock_response)
+        
+        # 验证结果
+        assert result is not None
+        assert result["user_id"] == user_data["user_id"]
+        assert result["username"] == user_data["username"]
+        assert result["roles"] == user_data["roles"]
+    
+    @pytest.mark.asyncio
+    async def test_auth_dependency_invalid_token(self, token_sdk_with_manager):
+        """测试使用无效令牌的验证依赖
+        
+        验证get_auth_dependency返回的依赖能够:
+        1. 正确识别并拒绝无效令牌
+        2. 抛出适当的HTTP异常
+        """
+        # 使用无效令牌
+        invalid_token = "invalid.token.string"
+        
+        # 创建模拟请求和响应
+        mock_request = MagicMock()
+        mock_request.cookies = {"access_token": invalid_token}
+        mock_response = MagicMock()
+        
+        # 获取验证依赖
+        auth_dependency = token_sdk_with_manager.get_auth_dependency()
+        
+        # 验证执行依赖会抛出HTTPException
+        with pytest.raises(HTTPException) as excinfo:
+            await auth_dependency(mock_request, mock_response)
+        
+        # 验证异常状态码为401
+        assert excinfo.value.status_code == 401
+    
+    @pytest.mark.asyncio
+    async def test_auth_dependency_missing_token(self, token_sdk_with_manager):
+        """测试缺少令牌的验证依赖
+        
+        验证get_auth_dependency返回的依赖能够:
+        1. 正确识别缺少令牌的请求
+        2. 抛出适当的HTTP异常
+        """
+        # 创建模拟请求和响应（无令牌）
+        mock_request = MagicMock()
+        mock_request.cookies = {}  # 空cookies
+        mock_request.headers = {}  # 空headers
+        mock_request.query_params = {}  # 空查询参数
+        mock_response = MagicMock()
+        
+        # 获取验证依赖
+        auth_dependency = token_sdk_with_manager.get_auth_dependency()
+        
+        # 验证执行依赖会抛出HTTPException
+        with pytest.raises(HTTPException) as excinfo:
+            await auth_dependency(mock_request, mock_response)
+        
+        # 验证异常状态码为401
+        assert excinfo.value.status_code == 401
+        assert "令牌不存在" in str(excinfo.value.detail)
+    
+    @pytest.mark.asyncio
+    async def test_auth_dependency_role_check(self, token_sdk_with_manager, user_data):
+        """测试角色验证功能
+        
+        验证get_auth_dependency返回的依赖能够:
+        1. 正确验证用户是否具有所需角色
+        2. 如果缺少所需角色，抛出适当的HTTP异常
+        """
+        from soulseal.users import UserRole
+        
+        # 创建具有USER角色的令牌
+        token = token_sdk_with_manager.create_token(
+            user_id=user_data["user_id"],
+            username=user_data["username"],
+            roles=["user"],  # 仅USER角色
+            device_id=user_data["device_id"]
+        )
+        
+        # 创建模拟请求和响应
+        mock_request = MagicMock()
+        mock_request.cookies = {"access_token": token}
+        mock_response = MagicMock()
+        
+        # 获取要求ADMIN角色的验证依赖
+        auth_dependency = token_sdk_with_manager.get_auth_dependency(require_roles=UserRole.ADMIN)
+        
+        # 验证执行依赖会抛出HTTPException（权限不足）
+        with pytest.raises(HTTPException) as excinfo:
+            await auth_dependency(mock_request, mock_response)
+        
+        # 验证异常状态码为403
+        assert excinfo.value.status_code == 403
+        assert "权限不足" in str(excinfo.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_auth_dependency_auto_refresh_expired_token(self, token_sdk_with_manager, user_data, tokens_manager):
+        """测试get_auth_dependency返回的依赖函数能自动刷新过期令牌
+        
+        验证:
+        1. 当令牌过期时，auth_dependency能检测到过期状态
+        2. 自动调用handle_token_refresh方法尝试刷新令牌
+        3. 成功刷新后返回新令牌的数据，而不是抛出401错误
+        
+        这个自动刷新机制可以无缝续期用户会话，提升用户体验。
+        """
+        # 创建一个已过期的令牌
+        now = datetime.utcnow()
+        past_time = now - timedelta(minutes=10)
+        
+        with patch('soulseal.tokens.token_models.datetime') as mock_datetime:
+            mock_datetime.utcnow.return_value = past_time
+            token_sdk_with_manager._access_token_expire_minutes = 5
+            
+            # 创建过期令牌
+            expired_token = token_sdk_with_manager.create_token(
+                user_id=user_data["user_id"],
+                username=user_data["username"],
+                roles=user_data["roles"],
+                device_id=user_data["device_id"]
+            )
+        
+        # 创建请求和响应
+        mock_request = MagicMock()
+        mock_request.cookies = {"access_token": expired_token}
+        mock_response = MagicMock()
+        
+        # 创建一个新的有效令牌用于刷新后返回
+        new_token = token_sdk_with_manager.create_token(
+            user_id=user_data["user_id"],
+            username=user_data["username"],
+            roles=user_data["roles"],
+            device_id=user_data["device_id"]
+        )
+        
+        # 模拟verify_token方法返回过期错误
+        with patch.object(token_sdk_with_manager, 'verify_token') as mock_verify:
+            # 设置模拟返回值 - 令牌已过期
+            mock_verify.return_value = Result.fail("令牌已过期")
+            
+            # 模拟handle_token_refresh方法
+            with patch.object(token_sdk_with_manager, 'handle_token_refresh') as mock_refresh:
+                # 设置模拟返回值 - 刷新成功
+                mock_refresh.return_value = Result.ok(
+                    data={
+                        "access_token": new_token,
+                        "user_id": user_data["user_id"],
+                        "username": user_data["username"],
+                        "roles": user_data["roles"],
+                        "device_id": user_data["device_id"]
+                    },
+                    message="令牌已刷新"
+                )
+                
+                # 获取验证依赖
+                auth_dependency = token_sdk_with_manager.get_auth_dependency()
+                
+                # 执行验证 - 这里不应该抛出异常，而是应该刷新令牌
+                result = await auth_dependency(mock_request, mock_response)
+                
+                # 验证verify_token和handle_token_refresh都被调用
+                mock_verify.assert_called_once_with(expired_token)
+                mock_refresh.assert_called_once_with(mock_request, mock_response)
+                
+                # 验证返回的结果
+                assert result is not None
+                assert result["user_id"] == user_data["user_id"]
+                assert result["username"] == user_data["username"]
+                assert result["roles"] == user_data["roles"]
+                assert result["device_id"] == user_data["device_id"]
+                assert "access_token" in result, "刷新后的令牌数据应包含access_token字段"
+                assert result["access_token"] == new_token, "应返回新令牌" 
