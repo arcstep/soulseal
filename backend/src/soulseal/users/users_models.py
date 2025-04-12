@@ -114,6 +114,20 @@ class User(BaseModel):
     is_locked: bool = Field(default=False, description="是否锁定")
     is_active: bool = Field(default=True, description="是否激活")
 
+    @model_validator(mode='after')
+    def ensure_profile_fields(self) -> 'User':
+        """确保个人资料字段存在
+        
+        即使在历史数据中，也确保display_name和bio字段总是存在。
+        """
+        if not hasattr(self, 'display_name') or self.display_name is None:
+            self.display_name = self.username
+        
+        if not hasattr(self, 'bio') or self.bio is None:
+            self.bio = ""
+        
+        return self
+
     @field_validator('username')
     def validate_username(cls, v: str) -> str:
         """验证用户名格式"""

@@ -126,11 +126,12 @@ def authenticated_client(client, registered_user):
     assert login_response.status_code == 200
     login_result = login_response.json()
     
-    # 保留原始客户端并附加访问令牌信息
+    # 保留原始客户端并附加用户信息
     client.cookies = login_response.cookies
-    client.access_token = login_result.get("access_token")
-    client.refresh_token = login_result.get("refresh_token")
     client.user_info = login_result.get("user")
+    
+    # 检查是否有访问令牌cookie
+    client.access_token = login_response.cookies.get("access_token")
     
     return client
 
@@ -233,6 +234,7 @@ class TestAuthEndpoints:
         1. 应返回成功结果
         2. 响应应该设置cookie
         3. 响应中应包含用户信息
+        4. 应该使用"cookie"作为令牌类型
         """
         # 登录请求
         response = client.post(
@@ -250,6 +252,9 @@ class TestAuthEndpoints:
         # 验证返回的用户信息
         assert "user" in result
         assert result["user"]["username"] == registered_user["user_data"]["username"]
+        
+        # 验证令牌类型为cookie
+        assert result["token_type"] == "cookie"
         
         # 验证cookie设置
         assert "access_token" in response.cookies
@@ -286,7 +291,7 @@ class TestAuthEndpoints:
         
         验证已登录用户获取资料:
         1. 应返回成功结果
-        2. 返回的数据应包含用户信息
+        2. 返回的数据应包含完整的用户信息
         """
         # 获取用户资料
         response = authenticated_client.get("/api/auth/profile")
@@ -295,8 +300,16 @@ class TestAuthEndpoints:
         assert response.status_code == 200
         result = response.json()
         
-        # 验证用户信息
+        # 验证用户信息字段
         assert "user_id" in result
+        assert "username" in result
+        assert "roles" in result
+        assert "email" in result
+        assert "mobile" in result
+        assert "device_id" in result
+        assert "created_at" in result
+        
+        # 验证用户名匹配预期
         assert result["username"] == authenticated_client.user_info["username"]
     
     def test_update_profile(self, authenticated_client):
@@ -504,11 +517,12 @@ def admin_client(client, admin_user):
     assert login_response.status_code == 200
     login_result = login_response.json()
     
-    # 保留原始客户端并附加访问令牌信息
+    # 保留原始客户端并附加用户信息
     client.cookies = login_response.cookies
-    client.access_token = login_result.get("access_token")
-    client.refresh_token = login_result.get("refresh_token")
     client.user_info = login_result.get("user")
+    
+    # 检查是否有访问令牌cookie
+    client.access_token = login_response.cookies.get("access_token")
     
     return client
 
@@ -578,7 +592,7 @@ class TestTokenRefreshFlow:
     def test_refresh_expired_token(self, client, registered_user, tokens_manager):
         """测试刷新过期的访问令牌
         
-        由于使用cookie方式存储令牌，验证登录成功并设置了cookie
+        验证登录成功并设置了cookie
         """
         # 登录获取令牌
         login_response = client.post(
@@ -619,10 +633,7 @@ class TestTokenRefreshFlow:
             mock_decode.side_effect = jwt.ExpiredSignatureError("Token expired")
             
             # 尝试刷新令牌
-            refresh_response = authenticated_client.post(
-                "/api/auth/refresh-token",
-                json={"token": authenticated_client.access_token}
-            )
+            refresh_response = authenticated_client.post("/api/auth/refresh-token")
         
         # 验证刷新失败
         assert refresh_response.status_code in (401, 403), "应该返回未授权或禁止访问错误"

@@ -303,8 +303,52 @@ def create_auth_endpoints(
     async def get_user_profile(
         token_claims: Dict[str, Any] = Depends(require_user(token_sdk, logger=logger))
     ):
-        """获取当前用户信息"""
-        return token_claims
+        """获取当前用户信息
+        
+        从数据库获取完整的用户资料，包括：
+        - 用户ID、用户名、角色
+        - 电子邮箱、手机号及其验证状态
+        - 个人资料（显示名称、个人简介等）
+        """
+        # 从令牌中获取用户ID
+        user_id = token_claims.get("user_id")
+        logger.debug(f"获取用户资料: {user_id}")
+        
+        # 从数据库获取完整的用户信息
+        user = users_manager.get_user(user_id)
+        if not user:
+            logger.error(f"用户不存在: {user_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="用户不存在"
+            )
+        
+        # 记录用户对象中的字段
+        logger.debug(f"用户对象字段: {[f for f in dir(user) if not f.startswith('_')]}")
+        logger.debug(f"display_name: '{getattr(user, 'display_name', '<无>')}'")
+        logger.debug(f"bio: '{getattr(user, 'bio', '<无>')}'")
+        
+        # 转换为字典并排除密码哈希
+        user_data = user.model_dump(exclude={"password_hash"})
+        
+        # 记录序列化后的字段
+        logger.debug(f"序列化后字段: {list(user_data.keys())}")
+        logger.debug(f"序列化display_name: '{user_data.get('display_name', '<无>')}'")
+        logger.debug(f"序列化bio: '{user_data.get('bio', '<无>')}'")
+        
+        # 将设备ID添加到用户数据中
+        user_data["device_id"] = token_claims.get("device_id")
+        
+        # 确保display_name和bio字段存在
+        if "display_name" not in user_data:
+            logger.warning(f"用户 {user_id} 缺少display_name字段，添加默认值")
+            user_data["display_name"] = user_data.get("username", "")
+        
+        if "bio" not in user_data:
+            logger.warning(f"用户 {user_id} 缺少bio字段，添加默认值")
+            user_data["bio"] = ""
+        
+        return user_data
 
     class UpdateUserProfileRequest(BaseModel):
         """更新用户个人设置请求"""
