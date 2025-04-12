@@ -1,6 +1,6 @@
 [project]
 name = "soulseal"
-version = "0.1.4"
+version = "0.1.5"
 description = "这是一套适合Python快速开发的身份管理模块，SoulSeal 取自修仙小说中的「灵魂烙印」。"
 authors = [
     {name = "arcstep",email = "43801@qq.com"}
@@ -19,7 +19,6 @@ dependencies = [
     "email-validator (>=2.2.0,<3.0.0)",
     "uvicorn (>=0.34.0,<0.35.0)",
     "httpx (>=0.28.1,<0.29.0)",
-    "pytest-asyncio (>=0.26.0,<0.27.0)",
     "requests (>=2.32.3,<3.0.0)",
     "aiohttp (>=3.11.16,<4.0.0)"
 ]
@@ -30,6 +29,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
+pytest-asyncio = "^0.26.0"
 
 [tool.poetry.scripts]
 soulseal = "soulseal.__main__:run_main"
