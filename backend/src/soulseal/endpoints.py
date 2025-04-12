@@ -234,14 +234,19 @@ def create_auth_endpoints(
                 detail=result.error
             )
 
-        # 将访问令牌和刷新令牌都返回，方便客户端存储
-        refresh_token = tokens_manager.get_refresh_token(user_info['user_id'], device_id)
-        return {
-            "access_token": result.data["access_token"],
-            "refresh_token": refresh_token,
-            "token_type": "bearer",
-            "user": user_info
-        }
+        # 如果使用cookie方式，不应直接返回tokens
+        if token_sdk.token_storage_method == "cookie":
+            return {
+                "token_type": "cookie",
+                "user": user_info
+            }
+        # 如果使用header方式，可以返回access_token但建议不返回refresh_token
+        else:
+            return {
+                "access_token": result.data["access_token"],
+                "token_type": "bearer",
+                "user": user_info
+            }
 
     @handle_errors()
     async def logout_device(

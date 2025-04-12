@@ -231,9 +231,8 @@ class TestAuthEndpoints:
         
         验证正确的用户名和密码登录:
         1. 应返回成功结果
-        2. 结果中应包含访问令牌和刷新令牌
-        3. 响应应该设置cookie
-        4. 响应中应包含用户信息
+        2. 响应应该设置cookie
+        3. 响应中应包含用户信息
         """
         # 登录请求
         response = client.post(
@@ -248,14 +247,12 @@ class TestAuthEndpoints:
         assert response.status_code == 200
         result = response.json()
         
-        # 验证返回的令牌和用户信息
-        assert "access_token" in result
-        assert "refresh_token" in result
+        # 验证返回的用户信息
         assert "user" in result
         assert result["user"]["username"] == registered_user["user_data"]["username"]
         
         # 验证cookie设置
-        assert "access_token" in response.cookies or "access_token" in dict(response.headers).get("set-cookie", "")
+        assert "access_token" in response.cookies
     
     def test_login_failure(self, client, registered_user):
         """测试用户登录失败
@@ -581,8 +578,7 @@ class TestTokenRefreshFlow:
     def test_refresh_expired_token(self, client, registered_user, tokens_manager):
         """测试刷新过期的访问令牌
         
-        由于实际实现中令牌刷新需要从cookie中获取令牌，
-        这个测试仅验证基本的登录功能。
+        由于使用cookie方式存储令牌，验证登录成功并设置了cookie
         """
         # 登录获取令牌
         login_response = client.post(
@@ -593,14 +589,11 @@ class TestTokenRefreshFlow:
             }
         )
         
-        token_data = login_response.json()
-        access_token = token_data["access_token"]
-        refresh_token = token_data["refresh_token"]
-        
-        # 断言基本的令牌获取成功
-        assert access_token is not None
-        assert refresh_token is not None
+        # 验证登录成功
         assert login_response.status_code == 200
+        
+        # 验证cookie中包含访问令牌
+        assert "access_token" in login_response.cookies
     
     def test_refresh_with_revoked_token(self, authenticated_client, tokens_manager):
         """测试撤销刷新令牌后无法刷新访问令牌
