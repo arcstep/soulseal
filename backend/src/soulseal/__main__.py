@@ -4,74 +4,159 @@ import argparse
 import asyncio
 import signal
 import os
+import sys
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+import atexit
 
 from .start import create_app
 
 def _parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description="Illufly API 服务")
-    arguments = [
-        ("--db-path", "./.db/soulseal", "数据库路径 (默认: ./db/soulseal)"),
-        ("--title", "SoulSeal API", "API 标题 (默认: SoulSeal API)"),
-        ("--description", "SoulSeal 后端 API 服务", "API 描述"),
-        ("--prefix", "/api", "API 路由前缀 (默认: /api)"),
-        ("--host", "0.0.0.0", "服务主机地址 (默认: 0.0.0.0)"),
-        ("--port", 31570, "服务端口 (默认: 31570)"),
-        ("--ssl-keyfile", None, "SSL 密钥文件路径"),
-        ("--ssl-certfile", None, "SSL 证书文件路径"),
-        ("--static-dir", None, "静态文件目录 (默认: 包内 static 目录)"),
-        ("--cors-origins", None, "CORS 服务地址列表，例如 http://localhost:3000"),
-        ("--log-level", "info", "日志级别 (默认: info)"),
-    ]
-    
-    for arg, default, help in arguments:
-        if arg in ["--cors-origins"]:
-            # 特殊处理 cors-origins 参数，支持多个参数值
-            parser.add_argument(arg, nargs='+', default=default, help=help)
-        else:
-            parser.add_argument(arg, default=default, help=help)
-
+    parser = argparse.ArgumentParser(description="启动 SoulSeal 服务器")
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=os.environ.get("SOULSEAL_DATA_DIR", str(Path.home() / ".soulseal")),
+        help="数据目录的路径"
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=os.environ.get("SOULSEAL_HOST", "127.0.0.1"),
+        help="主机地址"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("SOULSEAL_PORT", "8000")),
+        help="端口号"
+    )
+    parser.add_argument(
+        "--prefix",
+        type=str,
+        default=os.environ.get("SOULSEAL_PREFIX", "/api"),
+        help="API路由前缀"
+    )
+    parser.add_argument(
+        "--cors-origins",
+        type=str,
+        default=os.environ.get("SOULSEAL_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"),
+        help="CORS源列表，用逗号分隔"
+    )
+    parser.add_argument(
+        "--jwt-secret-key",
+        type=str,
+        default=os.environ.get("SOULSEAL_JWT_SECRET_KEY", None),
+        help="JWT密钥"
+    )
+    parser.add_argument(
+        "--jwt-algorithm",
+        type=str,
+        default=os.environ.get("SOULSEAL_JWT_ALGORITHM", None),
+        help="JWT算法"
+    )
+    parser.add_argument(
+        "--access-token-expire-minutes",
+        type=int,
+        default=int(os.environ.get("SOULSEAL_ACCESS_TOKEN_EXPIRE_MINUTES", "0")),
+        help="访问令牌过期时间(分钟)，0表示使用默认值"
+    )
+    parser.add_argument(
+        "--refresh-token-expire-days",
+        type=int,
+        default=int(os.environ.get("SOULSEAL_REFRESH_TOKEN_EXPIRE_DAYS", "0")),
+        help="刷新令牌过期时间(天)，0表示使用默认值"
+    )
+    parser.add_argument(
+        "--api-base-url",
+        type=str,
+        default=os.environ.get("SOULSEAL_API_BASE_URL", None),
+        help="API基础URL，用于子服务调用主服务"
+    )
+    parser.add_argument(
+        "--auto-renew-before-expiry-seconds",
+        type=int,
+        default=int(os.environ.get("SOULSEAL_AUTO_RENEW_BEFORE_EXPIRY_SECONDS", "60")),
+        help="访问令牌自动续订的提前时间(秒)"
+    )
     args = parser.parse_args()
-    args.log_level = getattr(logging, args.log_level.upper())
-    args.port = int(args.port)
+
+    # 使用环境变量或默认值
+    data_dir = Path(args.data_dir)
+    db_path = data_dir / "db"
     
+    # 分离CORS源
+    cors_origins = args.cors_origins.split(",") if args.cors_origins else []
+
+    # 将静态文件目录设置为data_dir下的static子目录
+    static_dir = data_dir / "static"
+    static_dir.mkdir(parents=True, exist_ok=True)
+
     return args
 
 async def main():
     """主函数"""
     args = _parse_args()
-    os.environ['LOG_LEVEL'] = str(args.log_level)
+    os.environ['LOG_LEVEL'] = "INFO"
+    
+    # 分离CORS源
+    cors_origins = args.cors_origins.split(",") if args.cors_origins else []
     
     app = create_app(
-        db_path=args.db_path,
-        title=args.title,
-        description=args.description,
+        db_path=str(args.data_dir / "db"),
+        title="SoulSeal API",
+        description="SoulSeal API文档",
+        cors_origins=cors_origins,
+        static_dir=str(args.data_dir / "static"),
         prefix=args.prefix,
-        static_dir=args.static_dir,
-        cors_origins=args.cors_origins
+        jwt_secret_key=args.jwt_secret_key,
+        jwt_algorithm=args.jwt_algorithm,
+        access_token_expire_minutes=args.access_token_expire_minutes if args.access_token_expire_minutes > 0 else None,
+        refresh_token_expire_days=args.refresh_token_expire_days if args.refresh_token_expire_days > 0 else None,
+        api_base_url=args.api_base_url,
+        auto_renew_before_expiry_seconds=args.auto_renew_before_expiry_seconds
     )
 
-    config = uvicorn.Config(    
-        app,
+    # 挂载静态文件
+    app.mount("/static", StaticFiles(directory=str(args.data_dir / "static")), name="static")
+
+    # 处理信号
+    should_exit = False
+
+    def handle_exit(signum, frame):
+        nonlocal should_exit
+        print(f"收到信号 {signum}，准备关闭服务器...")
+        should_exit = True
+
+    # 为各种信号注册处理程序
+    signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGTERM, handle_exit)
+    
+    # 在Windows上，SIGBREAK是Ctrl+Break
+    if hasattr(signal, 'SIGBREAK'):
+        signal.signal(signal.SIGBREAK, handle_exit)
+    
+    # 为了优雅关闭，我们可以添加一个退出处理程序
+    def cleanup():
+        if not should_exit:  # 如果尚未处理，则处理
+            print("退出中，清理资源...")
+            # 这里可以添加任何清理代码
+    
+    atexit.register(cleanup)
+
+    # 启动服务器
+    config = uvicorn.Config(
+        app=app,
         host=args.host,
         port=args.port,
-        ssl_keyfile=args.ssl_keyfile,
-        ssl_certfile=args.ssl_certfile,
-        log_level=args.log_level
+        reload=False
     )
-    server = uvicorn.Server(config)
 
-    # 设置信号处理
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(
-            sig,
-            lambda: asyncio.create_task(server.shutdown(), name="uvicorn-shutdown")
-        )
-    
-    # 启动服务器
+    server = uvicorn.Server(config)
     await server.serve()
 
+    return 0
 
 if __name__ == "__main__":
     """
@@ -81,4 +166,4 @@ if __name__ == "__main__":
     ## HTTP 开发环境
     poetry run python -m soulseal
     """
-    asyncio.run(main()) 
+    sys.exit(asyncio.run(main())) 

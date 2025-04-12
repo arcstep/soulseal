@@ -5,31 +5,13 @@ import uuid
 import logging
 from datetime import datetime, timedelta
 from enum import Enum
+import jwt
 
 from voidring import IndexedRocksDB
 from .http import handle_errors, HttpMethod
-from .models import User, UserRole, Result
-from .tokens import TokensManager, TokenClaims, TokenBlacklist
-from .users import UsersManager
-
-def _set_auth_cookies(response: Response, access_token: str, logger: logging.Logger) -> None:
-    """设置认证Cookie"""
-    try:
-        if access_token:
-            response.set_cookie(
-                key="access_token",
-                value=access_token,
-                httponly=True,
-                secure=False,
-                samesite="Lax",
-                max_age=3600*24*30
-            )
-        else:
-            response.delete_cookie("access_token")
-        logger.info(f"设置 cookies: {access_token}")
-    except Exception as e:
-        logger.error(f"设置 cookies 时发生错误: {str(e)}")
-        raise
+from .tokens import TokensManager, TokenBlacklist, TokenClaims
+from .users import UsersManager, User, UserRole
+from .models import Result
 
 def require_user(
     tokens_manager: TokensManager,
@@ -52,20 +34,14 @@ def require_user(
 
         如果要求角色，则需要用户具备所有指定的角色。
         """
-
-        # 获取当前用户的访问令牌
-        access_token = request.cookies.get("access_token")
-        if not access_token:
-            error = "令牌不存在，您必须登录获取刷新令牌和访问令牌"
-            logger.error(error)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=error
-            )
-
-        # 验证访问令牌
-        verify_result = tokens_manager.verify_access_token(access_token)        
-        if not verify_result.is_ok():
+        # 使用封装好的方法验证请求中的令牌
+        verify_result = tokens_manager.verify_request_token(
+            request=request,
+            response=response,
+            update_token=update_access_token
+        )
+        
+        if verify_result.is_fail():
             error = f"令牌验证失败: {verify_result.error}"
             logger.error(error)
             raise HTTPException(
@@ -75,13 +51,6 @@ def require_user(
 
         token_claims = verify_result.data
         logger.debug(f"验证用户信息: {token_claims}")
-
-        # 更新令牌到 response 的 cookie
-        # JWT 的 encode 和 decode 通常基于对 CPU 可以忽略不计的 HMAC 计算
-        if update_access_token:
-            access_token = TokenClaims.create_access_token(**token_claims).jwt_encode()
-            _set_auth_cookies(response, access_token, logger)
-            logger.debug(f"设置令牌到 Cookie: {access_token}")
 
         # 如果要求所有角色，则需要用户具备指定的角色
         if require_roles and not UserRole.has_role(require_roles, token_claims['roles']):
@@ -214,37 +183,29 @@ def create_auth_endpoints(
         )
         logger.debug(f"更新设备刷新令牌: {device_id}")
 
-        # 创建设备访问令牌
-        result = _refresh_access_token(
-            user_info=user_info,
-            device_id=device_id,
-            response=response
-        )
-
-        return result.data
-
-    def _refresh_access_token(
-        user_info: Dict[str, Any],
-        device_id: str,
-        response: Response,
-    ):
-        """刷新访问令牌"""
-        result = tokens_manager.refresh_access_token(
+        # 创建设备访问令牌并设置到响应
+        result = tokens_manager.create_and_set_token(
+            response=response,
             user_id=user_info['user_id'],
-            device_id=device_id,
             username=user_info['username'],
-            roles=user_info['roles']
+            roles=user_info['roles'],
+            device_id=device_id
         )
-        logger.debug(f"创建设备访问令牌: {result}")
-        if result.is_ok():
-            access_token = TokenClaims.create_access_token(**result.data).jwt_encode()
-            _set_auth_cookies(response, access_token=access_token, logger=logger)
-        else:
+
+        if result.is_fail():
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result.error
             )
-        return result
+
+        # 将访问令牌和刷新令牌都返回，方便客户端存储
+        refresh_token = tokens_manager.get_refresh_token(user_info['user_id'], device_id)
+        return {
+            "access_token": result.data["access_token"],
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": user_info
+        }
 
     @handle_errors()
     async def logout_device(
@@ -268,7 +229,7 @@ def create_auth_endpoints(
         )
         
         # 删除当前设备的cookie
-        _set_auth_cookies(response, access_token=None, logger=logger)
+        tokens_manager.set_token_to_response(response, None)
 
         return {"message": "注销成功"}
 
@@ -317,19 +278,23 @@ def create_auth_endpoints(
         """更新当前用户的个人设置"""
         result = users_manager.update_user(token_claims['user_id'], **update_form.to_update)
         if result.is_ok():
-        # 更新设备访问令牌
-            result = _refresh_access_token(
-                user_info=result.data,
-                device_id=token_claims['device_id'],
-                response=response
+            # 更新设备访问令牌
+            token_result = tokens_manager.create_and_set_token(
+                response=response,
+                user_id=result.data['user_id'],
+                username=result.data['username'],
+                roles=result.data['roles'],
+                device_id=token_claims['device_id']
             )
-            if result.is_fail():
+            if token_result.is_fail():
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=result.error
+                    detail=token_result.error
                 )
-            result.message = "用户信息更新成功"
-            return result.data
+            return {
+                "message": "用户信息更新成功",
+                "user": result.data
+            }
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -356,6 +321,71 @@ def create_auth_endpoints(
         is_blacklisted = token_blacklist.contains(token_id)
         return {"is_blacklisted": is_blacklisted}
     
+    class TokenRequest(BaseModel):
+        """令牌请求基类"""
+        token: Optional[str] = Field(None, description="访问令牌")
+        
+    @handle_errors()
+    async def renew_token(
+        request: Request,
+        response: Response,
+        token_claims: Dict[str, Any] = Depends(require_user(tokens_manager, update_access_token=False, logger=logger))
+    ):
+        """续订访问令牌
+        
+        在访问令牌即将过期之前主动调用该接口获取新的访问令牌，
+        与通过过期的访问令牌自动刷新访问令牌不同，此方法不需要验证刷新令牌，
+        只需验证当前访问令牌有效。
+        """
+        # 使用当前有效的访问令牌信息创建新的访问令牌
+        result = tokens_manager.renew_access_token(
+            user_id=token_claims['user_id'],
+            username=token_claims['username'],
+            roles=token_claims['roles'],
+            device_id=token_claims['device_id']
+        )
+        
+        if result.is_ok():
+            # 创建新的访问令牌
+            access_token = TokenClaims.create_access_token(**result.data).jwt_encode()
+            # 设置令牌到Cookie
+            _set_auth_cookies(response, access_token=access_token, logger=logger)
+            return {"access_token": access_token, "message": "访问令牌续订成功"}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result.error
+            )
+    
+    @handle_errors()
+    async def refresh_token(
+        request: Request, 
+        response: Response,
+        token_request: TokenRequest
+    ):
+        """刷新过期的访问令牌
+        
+        使用过期的访问令牌和存储的刷新令牌获取新的访问令牌。
+        此方法主要供其他服务调用，用于在访问令牌过期后获取新的访问令牌。
+        """
+        # 使用封装的方法处理令牌刷新
+        result = tokens_manager.handle_token_refresh(request, response)
+        
+        if result.is_fail():
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=result.error
+            )
+        
+        # 根据请求类型返回不同格式的结果
+        if "application/json" in request.headers.get("accept", ""):
+            # API请求，返回访问令牌
+            return result.data
+        else:
+            # 浏览器请求，只返回成功消息
+            return {"message": "访问令牌刷新成功"}
+            
+    
     return [
         (HttpMethod.POST, f"{prefix}/auth/register", register),
         (HttpMethod.POST, f"{prefix}/auth/login", login),
@@ -363,5 +393,7 @@ def create_auth_endpoints(
         (HttpMethod.POST, f"{prefix}/auth/change-password", change_password),
         (HttpMethod.POST, f"{prefix}/auth/profile", update_user_profile),
         (HttpMethod.GET, f"{prefix}/auth/profile", get_user_profile),
-        (HttpMethod.POST, f"{prefix}/token/blacklist/check", check_blacklist)
+        (HttpMethod.POST, f"{prefix}/token/blacklist/check", check_blacklist),
+        (HttpMethod.POST, f"{prefix}/auth/renew-token", renew_token),
+        (HttpMethod.POST, f"{prefix}/auth/refresh-token", refresh_token)
     ]
