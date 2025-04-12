@@ -52,7 +52,8 @@ class User(BaseModel):
     @classmethod
     def can_update_field(cls, fields: List[str]) -> bool:
         """检查是否可以更新字段"""
-        return all(field in ["username", "email", "mobile"] for field in fields)
+        allowed_fields = ["username", "email", "mobile", "display_name", "bio"]
+        return all(field in allowed_fields for field in fields)
 
     @staticmethod
     def generate_random_password(length: int = 12) -> str:
@@ -92,6 +93,10 @@ class User(BaseModel):
     mobile: str = Field(default="", description="手机号")
     mobile_verified: bool = Field(default=False, description="手机号是否验证")
 
+    # 用户个人资料
+    display_name: str = Field(default="", description="显示名称")
+    bio: str = Field(default="", description="个人简介")
+
     # 用户角色
     roles: Set[UserRole] = Field(
         default_factory=lambda: {UserRole.USER},
@@ -125,18 +130,35 @@ class User(BaseModel):
             return UserRole(v)
         return v
 
-    def verify_password(self, to_verify_password: str) -> bool:
-        """密码验证"""
+    def verify_password(self, to_verify_password: str) -> Dict[str, bool]:
+        """密码验证
+        
+        如果密码正确，返回一个包含rehash标志的字典
+        如果密码错误，抛出异常
+        
+        Args:
+            to_verify_password: 待验证的密码
+            
+        Returns:
+            Dict[str, bool]: 包含rehash标志的字典
+            
+        Raises:
+            Exception: 当密码不匹配时抛出
+        """
         if not to_verify_password:
-            return False
+            raise Exception("密码不能为空")
         
         ph = PasswordHasher()
-        ph.verify(self.password_hash, to_verify_password)
-
-        if ph.check_needs_rehash(self.password_hash):
-            self.password_hash = ph.hash(to_verify_password)
-            return {"rehash": True}
-        return {"rehash": False}
+        try:
+            ph.verify(self.password_hash, to_verify_password)
+            
+            # 检查是否需要重新哈希
+            if ph.check_needs_rehash(self.password_hash):
+                self.password_hash = ph.hash(to_verify_password)
+                return {"rehash": True}
+            return {"rehash": False}
+        except Exception as e:
+            raise Exception(f"密码错误: {str(e)}")
     
     def is_password_expired(self) -> bool:
         """检查密码是否过期

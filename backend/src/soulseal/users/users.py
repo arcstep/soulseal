@@ -119,8 +119,12 @@ class UsersManager:
     def delete_user(self, user_id: str) -> Result[None]:
         """删除用户"""
         try:
-            if not self._db.delete(user_id):
+            user = self.get_user(user_id)
+            if not user:
                 return Result.fail("用户不存在")
+            
+            # 使用索引删除用户
+            self._db.delete_with_indexes(__USER_MODEL_NAME__, user_id)
             return Result.ok()
         except Exception as e:
             return Result.fail(f"删除用户失败: {str(e)}")
@@ -141,9 +145,12 @@ class UsersManager:
                 return Result.fail("用户不存在")
 
             # 验证旧密码
-            if not user.verify_password(current_password):
-                return Result.fail("旧密码错误")
-
+            try:
+                user.verify_password(current_password)
+            except Exception as e:
+                self._logger.warning(f"密码验证失败: {str(e)}")
+                return Result.fail("密码错误")
+            
             return self.reset_password(user_id, new_password)
 
         except Exception as e:

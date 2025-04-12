@@ -1,6 +1,6 @@
 [project]
 name = "soulseal"
-version = "0.1.2"
+version = "0.1.3"
 description = "这是一套适合Python快速开发的身份管理模块，SoulSeal 取自修仙小说中的「灵魂烙印」。"
 authors = [
     {name = "arcstep",email = "43801@qq.com"}
@@ -30,4 +30,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
+
+[tool.poetry.scripts]
+soulseal = "soulseal.__main__:run_main"
 

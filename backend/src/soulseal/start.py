@@ -42,7 +42,8 @@ def create_app(
     access_token_expire_minutes: int = None,
     refresh_token_expire_days: int = None,
     api_base_url: str = None,
-    auto_renew_before_expiry_seconds: int = 60
+    auto_renew_before_expiry_seconds: int = 60,
+    token_storage_method: str = "cookie"
 ):
     """启动soulseal
     
@@ -59,6 +60,7 @@ def create_app(
         refresh_token_expire_days: 刷新令牌过期时间(天)
         api_base_url: API基础URL，用于子服务调用主服务
         auto_renew_before_expiry_seconds: 访问令牌自动续订的提前时间(秒)
+        token_storage_method: 访问令牌的存储方式，可选值：cookie, header, both
     """
     # 创建 FastAPI 应用实例
     version = __version__
@@ -99,7 +101,8 @@ def create_app(
     # 创建令牌管理器，传入黑名单和JWT配置
     tokens_manager = TokensManager(
         db=db, 
-        token_blacklist=blacklist
+        token_blacklist=blacklist,
+        token_storage_method=token_storage_method
     )
     
     # 如果有API基础URL，则使用TokenSDK创建一个公共实例作为应用程序属性
@@ -109,7 +112,8 @@ def create_app(
             jwt_algorithm=jwt_algo,
             access_token_expire_minutes=token_expire_minutes,
             api_base_url=api_base_url,
-            auto_renew_before_expiry_seconds=auto_renew_before_expiry_seconds
+            auto_renew_before_expiry_seconds=auto_renew_before_expiry_seconds,
+            token_storage_method=token_storage_method
         )
     
     users_manager = UsersManager(db)

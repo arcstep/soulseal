@@ -43,12 +43,12 @@ class TokenSDK:
     
     def __init__(
         self, 
-        jwt_secret_key: str = None, 
-        jwt_algorithm: str = None,
-        access_token_expire_minutes: int = None,
-        tokens_manager = None,  # TokensManager对象
-        api_base_url: str = None,  # 远程API基础URL
+        jwt_secret_key=None,
+        jwt_algorithm=None,
+        tokens_manager=None,  # 可选的TokensManager实例
+        api_base_url=None,    # 远程API地址
         auto_renew_before_expiry_seconds: int = 60,  # 提前自动续订的秒数
+        token_storage_method="cookie"
     ):
         """初始化令牌SDK
         
@@ -61,20 +61,24 @@ class TokenSDK:
         Args:
             jwt_secret_key: JWT密钥，如果不提供则使用环境变量FASTAPI_SECRET_KEY
             jwt_algorithm: JWT算法，如果不提供则使用默认HS256
-            access_token_expire_minutes: 访问令牌有效期(分钟)
             tokens_manager: TokensManager对象，用于本地模式下验证令牌和黑名单
             api_base_url: 远程API基础URL，用于远程模式下验证令牌和黑名单
             auto_renew_before_expiry_seconds: 在令牌过期前多少秒自动续订
+            token_storage_method: 令牌存储方式，默认为"cookie"
         """
         self._logger = logging.getLogger(__name__)
         self._jwt_secret_key = jwt_secret_key or JWT_SECRET_KEY
         self._jwt_algorithm = jwt_algorithm or JWT_ALGORITHM
-        self._access_token_expire_minutes = access_token_expire_minutes or ACCESS_TOKEN_EXPIRE_MINUTES
+        self._access_token_expire_minutes = ACCESS_TOKEN_EXPIRE_MINUTES
         self._auto_renew_before_expiry_seconds = auto_renew_before_expiry_seconds
         
         # 设置工作模式：本地模式、远程模式或独立模式
         self._tokens_manager = tokens_manager
         self._api_base_url = api_base_url
+        
+        # 设置令牌存储方式
+        self.token_storage_method = token_storage_method
+        self._logger.debug(f"令牌存储方式: {self.token_storage_method}")
         
         if tokens_manager and api_base_url:
             self._logger.warning("同时提供了tokens_manager和api_base_url，将优先使用tokens_manager")
@@ -88,7 +92,7 @@ class TokenSDK:
         else:
             self._mode = "standalone"
             self._logger.warning("TokenSDK初始化为独立模式，仅提供基本的令牌验证，不支持黑名单和续订")
-            self._token_blacklist = {}
+            self._internal_blacklist = {}
 
     @classmethod
     def create_access_token(
@@ -177,7 +181,8 @@ class TokenSDK:
         
         检查令牌的签名、有效期和是否在黑名单中。
         根据不同的工作模式有不同的行为：
-        - 本地模式和远程模式：支持令牌即将过期时自动续订和令牌过期后自动刷新
+        - 本地模式：支持令牌即将过期时自动续订，过期后自动尝试刷新
+        - 远程模式：只进行基本验证，不支持自动续订和刷新
         - 独立模式：仅支持基本验证，不支持续订和刷新
         
         Args:
@@ -187,21 +192,22 @@ class TokenSDK:
             Result: 验证结果，包含令牌数据或错误信息
         """
         try:
-            # 解析但不验证签名获取必要信息
+            # 先解码令牌但不验证过期时间，获取必要的信息
             unverified = jwt.decode(
-                token, key=None,
-                options={'verify_signature': False, 'verify_exp': False}
+                token, key=self._jwt_secret_key, 
+                algorithms=[self._jwt_algorithm],
+                options={'verify_exp': False}
             )
             
             user_id = unverified.get("user_id")
             device_id = unverified.get("device_id")
             
-            # 检查是否在黑名单中
-            if self.is_blacklisted(user_id, device_id):
+            # 检查黑名单
+            if user_id and device_id and self.is_blacklisted(user_id, device_id):
                 return Result.fail("令牌已被撤销")
-                
-            # 验证签名和过期时间
+            
             try:
+                # 验证签名和过期时间
                 payload = jwt.decode(
                     token,
                     key=self._jwt_secret_key,
@@ -209,59 +215,98 @@ class TokenSDK:
                     options={"verify_exp": True}
                 )
                 
-                # 检查是否即将过期
-                exp_timestamp = payload.get("exp", 0)
-                now_timestamp = datetime.timestamp(datetime.utcnow())
-                seconds_to_expire = exp_timestamp - now_timestamp
-                
-                # 如果即将过期，尝试自动续订
-                if seconds_to_expire < self._auto_renew_before_expiry_seconds:
-                    self._logger.info(f"令牌即将过期，剩余 {seconds_to_expire} 秒，尝试自动续订")
+                # 在令牌验证通过的情况下，检查是否即将过期（仅本地模式）
+                if self._mode == "local" and self._tokens_manager and user_id and device_id:
+                    exp_timestamp = payload.get("exp", 0)
+                    now_timestamp = datetime.timestamp(datetime.utcnow())
+                    seconds_to_expire = exp_timestamp - now_timestamp
                     
-                    if self._mode == "local" and self._tokens_manager:
-                        # 本地模式下的续订
-                        renew_result = self.renew_token(
-                            token=token,
+                    # 如果令牌即将过期，自动续订
+                    if seconds_to_expire < self._auto_renew_before_expiry_seconds:
+                        self._logger.info(f"令牌即将过期，剩余 {seconds_to_expire} 秒，尝试自动续订: {user_id}")
+                        
+                        # 尝试续订令牌
+                        renew_result = self._tokens_manager.renew_access_token(
                             user_id=user_id,
-                            device_id=device_id,
-                            token_data=payload
+                            username=unverified.get("username"),
+                            roles=unverified.get("roles"),
+                            device_id=device_id
                         )
                         
-                        if renew_result.is_ok() and "new_token" in renew_result.data:
-                            payload = jwt.decode(
-                                renew_result.data["new_token"],
-                                key=self._jwt_secret_key,
-                                algorithms=[self._jwt_algorithm]
-                            )
-                            return Result.ok(data=payload, message="令牌已自动续订")
-                    
-                    elif self._mode == "remote" and self._api_base_url:
-                        # 远程模式下的续订
-                        # 实现略，与本地模式类似
-                        pass
+                        if renew_result.is_ok():
+                            self._logger.info(f"自动续订令牌成功: {user_id}")
+                            
+                            # 确保结果中包含access_token字段
+                            if "access_token" not in renew_result.data:
+                                # 如果数据中没有access_token字段，创建一个新的结果对象
+                                return Result.ok(
+                                    data={
+                                        "access_token": self.create_token(
+                                            user_id=user_id,
+                                            username=unverified.get("username"),
+                                            roles=unverified.get("roles"),
+                                            device_id=device_id
+                                        ),
+                                        **renew_result.data
+                                    },
+                                    message="令牌自动续订成功"
+                                )
+                            
+                            return renew_result
+                        
+                        self._logger.warning(f"自动续订令牌失败: {renew_result.error}")
                 
-                # 令牌有效
+                # 如果不需要续订，将原始token包含在返回数据中
+                payload["access_token"] = token
                 return Result.ok(data=payload)
                 
             except jwt.ExpiredSignatureError:
-                # 令牌已过期
-                self._logger.warning(f"令牌已过期: {user_id}:{device_id}")
+                # 如果是本地模式，尝试自动刷新过期的令牌
+                if self._mode == "local" and self._tokens_manager and user_id and device_id:
+                    self._logger.info(f"本地模式下令牌已过期，尝试自动刷新: {user_id}")
+                    
+                    # 尝试使用刷新令牌获取新的访问令牌
+                    refresh_result = self._tokens_manager.refresh_access_token(
+                        user_id=user_id,
+                        username=unverified.get("username"),
+                        roles=unverified.get("roles"),
+                        device_id=device_id
+                    )
+                    
+                    if refresh_result.is_ok():
+                        self._logger.info(f"自动刷新令牌成功: {user_id}")
+                        
+                        # 确保结果中包含access_token字段
+                        if "access_token" not in refresh_result.data:
+                            # 如果数据中没有access_token字段，创建一个新的结果对象
+                            return Result.ok(
+                                data={
+                                    "access_token": self.create_token(
+                                        user_id=user_id,
+                                        username=unverified.get("username"),
+                                        roles=unverified.get("roles"),
+                                        device_id=device_id
+                                    ),
+                                    **refresh_result.data
+                                },
+                                message="令牌自动刷新成功"
+                            )
+                        
+                        return refresh_result
+                    
+                    self._logger.warning(f"自动刷新令牌失败: {refresh_result.error}")
+                
+                # 令牌过期，返回错误
                 return Result.fail("令牌已过期")
-                
-            except jwt.InvalidSignatureError:
-                # 签名无效
-                self._logger.warning(f"令牌签名无效: {user_id}:{device_id}")
-                return Result.fail("令牌签名无效")
-            
-            except Exception as e:
-                # 其他验证错误
-                self._logger.warning(f"令牌验证错误: {str(e)}")
-                return Result.fail(f"令牌验证错误: {str(e)}")
-                
+        
+        except jwt.InvalidSignatureError:
+            # 签名无效
+            self._logger.warning(f"令牌签名无效")
+            return Result.fail("令牌签名无效")
         except Exception as e:
-            # 解析错误
-            self._logger.warning(f"令牌解析错误: {str(e)}")
-            return Result.fail(f"令牌解析错误: {str(e)}")
+            # 其他验证错误
+            self._logger.warning(f"令牌验证错误: {str(e)}")
+            return Result.fail(f"令牌验证错误: {str(e)}")
 
     def renew_token(self, token: str, user_id: str, device_id: str, token_data: Dict[str, Any]) -> Result[Dict[str, Any]]:
         """在令牌即将过期时续订访问令牌
@@ -432,8 +477,8 @@ class TokenSDK:
                 return False
         
         # 独立模式使用内部字典
-        return (token_id in self._token_blacklist and 
-                datetime.utcnow() < self._token_blacklist.get(token_id, datetime.utcnow()))
+        return (token_id in self._internal_blacklist and 
+                datetime.utcnow() < self._internal_blacklist.get(token_id, datetime.utcnow()))
 
     def revoke_token(self, user_id: str, device_id: str, expires_at: datetime = None) -> bool:
         """将令牌加入黑名单
@@ -485,7 +530,7 @@ class TokenSDK:
         
         # 独立模式下的简单撤销
         if self._mode == "standalone":
-            self._token_blacklist[token_id] = expires_at
+            self._internal_blacklist[token_id] = expires_at
             self._logger.info(f"独立模式撤销令牌: {token_id}, 过期时间: {expires_at}")
             return True
         
@@ -526,7 +571,7 @@ class TokenSDK:
         
         # 独立模式使用内部字典
         else:
-            self._token_blacklist[token_id] = expires_at
+            self._internal_blacklist[token_id] = expires_at
             self._logger.info(f"令牌已加入黑名单: {token_id}")
 
     def extract_token_from_request(self, request) -> Optional[str]:
@@ -581,7 +626,7 @@ class TokenSDK:
     def set_token_to_response(self, response, token: str, token_type: str = "access", max_age: int = None) -> None:
         """将令牌设置到响应中
         
-        支持将令牌设置为Cookie。
+        支持将令牌设置为Cookie和/或响应头部，根据token_storage_method配置。
         
         Args:
             response: HTTP响应对象，可以是FastAPI的Response或其他兼容对象
@@ -592,21 +637,31 @@ class TokenSDK:
         try:
             if token is None:
                 # 删除cookie
-                if hasattr(response, "delete_cookie"):
-                    response.delete_cookie(f"{token_type}_token")
-                    self._logger.debug(f"删除{token_type}令牌Cookie成功")
+                if self.token_storage_method in ["cookie", "both"]:
+                    if hasattr(response, "delete_cookie"):
+                        response.delete_cookie(f"{token_type}_token")
+                        self._logger.debug(f"删除{token_type}令牌Cookie成功")
             else:
+                # 根据存储方式设置令牌
+                
                 # 设置cookie
-                if hasattr(response, "set_cookie"):
-                    response.set_cookie(
-                        key=f"{token_type}_token",
-                        value=token,
-                        httponly=True,
-                        secure=False,  # 在生产环境应设为True
-                        samesite="Lax",
-                        max_age=max_age
-                    )
-                    self._logger.debug(f"设置{token_type}令牌Cookie成功")
+                if self.token_storage_method in ["cookie", "both"]:
+                    if hasattr(response, "set_cookie"):
+                        response.set_cookie(
+                            key=f"{token_type}_token",
+                            value=token,
+                            httponly=True,
+                            secure=False,  # 在生产环境应设为True
+                            samesite="Lax",
+                            max_age=max_age
+                        )
+                        self._logger.debug(f"设置{token_type}令牌Cookie成功")
+                
+                # 设置头部
+                if self.token_storage_method in ["header", "both"]:
+                    if hasattr(response, "headers"):
+                        response.headers["X-Access-Token"] = token
+                        self._logger.debug(f"设置{token_type}令牌到响应头部成功")
         except Exception as e:
             self._logger.error(f"设置{token_type}令牌到响应失败: {str(e)}")
     
@@ -720,3 +775,22 @@ class TokenSDK:
             
         except Exception as e:
             return Result.fail(f"处理令牌刷新失败: {str(e)}")
+
+class TokensManager:
+    """令牌管理器
+    
+    处理API的令牌操作，如创建、黑名单管理等。
+    """
+    
+    def __init__(self, db, token_blacklist, token_storage_method = "cookie"):
+        """初始化令牌管理器
+        
+        Args:
+            db: 数据库实例
+            token_blacklist: 令牌黑名单实例
+            token_storage_method: 令牌存储方式，可选值：cookie, header, both
+        """
+        self.db = db
+        self.token_blacklist = token_blacklist
+        self.token_storage_method = token_storage_method
+        self._logger = logging.getLogger(__name__)
