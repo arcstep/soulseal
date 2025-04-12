@@ -206,6 +206,11 @@ class TokensManager:
         当访问令牌过期时，使用用户的刷新令牌来创建新的访问令牌。
         此方法由TokenSDK在本地模式下调用，用于自动刷新过期的访问令牌。
         
+        严格遵循以下令牌颁发流程：
+        1. 如果刷新令牌不存在，必须返回401，要求用户重新登录
+        2. 如果刷新令牌存在但已过期，必须返回401，要求用户重新登录
+        3. 只有当刷新令牌存在且有效时，才能创建新的访问令牌
+        
         Args:
             user_id: 用户ID
             username: 用户名
@@ -219,7 +224,7 @@ class TokensManager:
         refresh_token = self.get_refresh_token(user_id, device_id)
         if not refresh_token:
             self._logger.warning(f"刷新令牌不存在: {user_id}:{device_id}")
-            return Result.fail("刷新令牌不存在")
+            return Result.fail("刷新令牌不存在，请重新登录")
         
         try:
             # 验证刷新令牌
@@ -232,7 +237,7 @@ class TokensManager:
             # 检查令牌类型
             if refresh_data.get("token_type") != TokenType.REFRESH:
                 self._logger.warning(f"无效的刷新令牌类型: {refresh_data.get('token_type')}")
-                return Result.fail("无效的刷新令牌类型")
+                return Result.fail("无效的刷新令牌类型，请重新登录")
             
             # 创建新的访问令牌
             claims = TokenClaims.create_access_token(user_id, username, roles, device_id)
@@ -254,7 +259,8 @@ class TokensManager:
             
         except jwt.ExpiredSignatureError:
             self._logger.warning(f"刷新令牌已过期: {user_id}")
-            return Result.fail("刷新令牌已过期")
+            return Result.fail("刷新令牌已过期，请重新登录")
+            
         except Exception as e:
             self._logger.error(f"刷新访问令牌失败: {str(e)}")
             return Result.fail(f"刷新访问令牌失败: {str(e)}")

@@ -175,3 +175,106 @@ app.add_middleware(
 3. **微服务架构**：
    - 部署一个中心SoulSeal服务
    - 各微服务使用TokenSDK远程模式验证令牌
+
+## 令牌管理集成指南
+
+SoulSeal采用标准的JWT令牌认证机制，提供完整的令牌生命周期管理功能。以下是集成指南：
+
+### 令牌流程概述
+
+1. **获取令牌**：用户登录时获取访问令牌和刷新令牌
+2. **使用令牌**：将访问令牌附加到API请求中
+3. **令牌续订**：在访问令牌即将过期前主动续订
+4. **令牌刷新**：在访问令牌过期后使用刷新令牌获取新的访问令牌
+5. **令牌撤销**：用户注销时撤销令牌
+
+### 客户端集成最佳实践
+
+#### 令牌存储
+
+- **Cookie模式**：系统默认使用HTTP-only Cookie存储令牌，客户端无需额外处理
+- **Header模式**：若使用Header模式，客户端需要自行存储令牌（localStorage或其他安全方式）
+
+#### 令牌使用
+
+每个API请求需要包含有效的访问令牌，通过以下方式之一：
+
+```javascript
+// 使用Cookie (默认方式，无需额外代码)
+
+// 或使用Authorization头
+fetch('/api/protected', {
+  headers: {
+    'Authorization': `Bearer ${accessToken}`
+  }
+})
+
+// 或作为URL参数
+fetch('/api/protected?access_token=yourTokenHere')
+```
+
+#### 处理令牌过期
+
+客户端应实现以下令牌管理策略：
+
+1. **主动续订**：监控令牌有效期，在过期前调用续订API
+   ```javascript
+   // 示例：检查令牌是否即将过期（例如剩余10分钟）
+   if (tokenExpiresIn < 10 * 60) {
+     // 调用续订API
+     const response = await fetch('/api/auth/renew-token', {
+       method: 'POST',
+       credentials: 'include' // 包含Cookie
+     });
+     // 系统会自动设置新的Cookie或返回新令牌
+   }
+   ```
+
+2. **过期后刷新**：捕获401错误，尝试刷新令牌
+   ```javascript
+   async function apiRequest(url, options = {}) {
+     try {
+       const response = await fetch(url, options);
+       if (response.ok) return response.json();
+       
+       if (response.status === 401) {
+         // 尝试刷新令牌
+         const refreshResult = await fetch('/api/auth/refresh-token', {
+           method: 'POST',
+           credentials: 'include'
+         });
+         
+         if (refreshResult.ok) {
+           // 令牌已刷新，重试原始请求
+           return apiRequest(url, options);
+         } else {
+           // 刷新失败，需要重新登录
+           redirectToLogin();
+         }
+       }
+       
+       throw new Error(`API error: ${response.status}`);
+     } catch (error) {
+       console.error('Request failed:', error);
+       throw error;
+     }
+   }
+   ```
+
+### API端点
+
+| 端点 | 方法 | 描述 | 需要认证 |
+|------|------|------|----------|
+| `/api/auth/login` | POST | 登录并获取令牌 | 否 |
+| `/api/auth/renew-token` | POST | 续订未过期的访问令牌 | 是 |
+| `/api/auth/refresh-token` | POST | 使用刷新令牌获取新的访问令牌 | 是(过期的令牌) |
+| `/api/auth/logout` | POST | 撤销当前设备的令牌 | 是 |
+
+### 安全注意事项
+
+1. 访问令牌的有效期较短（默认30分钟），刷新令牌有效期较长（默认7天）
+2. 刷新令牌存储在服务器端，不会暴露给客户端
+3. 注销时会同时撤销访问令牌和刷新令牌
+4. 令牌撤销后会被加入黑名单，即使未过期也无法使用
+
+通过正确实现以上策略，客户端可以提供流畅的用户体验，同时确保系统安全性。

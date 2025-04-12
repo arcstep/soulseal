@@ -13,87 +13,6 @@ from .tokens import TokensManager, TokenBlacklist, TokenClaims, TokenSDK
 from .users import UsersManager, User, UserRole
 from .models import Result
 
-def require_user(
-    token_sdk: TokenSDK,
-    require_roles: Union[UserRole, List[UserRole]] = None,
-    update_access_token: bool = True,
-    logger: logging.Logger = None
-) -> Callable[[Request, Response], Dict[str, Any]]:
-    """验证用户信息
-
-    Args:
-        token_sdk: 令牌SDK
-        require_roles: 要求的角色
-        update_access_token: 是否自动更新访问令牌
-        logger: 日志记录器
-    """
-    if logger is None:
-        logger = logging.getLogger(__name__)
-
-    async def verified_user(
-        request: Request,
-        response: Response,
-    ) -> Dict[str, Any]:
-        """验证用户信息
-
-        如果要求角色，则需要用户具备所有指定的角色。
-        """
-        # 从请求中提取令牌
-        token = token_sdk.extract_token_from_request(request)
-        if not token:
-            error = "令牌不存在"
-            logger.error(error)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, 
-                detail=error
-            )
-        
-        # 验证令牌
-        verify_result = token_sdk.verify_token(token)
-        
-        if verify_result.is_fail():
-            error = f"令牌验证失败: {verify_result.error}"
-            logger.error(error)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, 
-                detail=error
-            )
-        
-        token_claims = verify_result.data
-        logger.debug(f"验证用户信息: {token_claims}")
-        
-        # 如果提供了响应对象且需要更新令牌
-        if response and update_access_token:
-            # 如果令牌即将过期，自动续订
-            exp_timestamp = token_claims.get("exp", 0)
-            now_timestamp = datetime.timestamp(datetime.utcnow())
-            seconds_to_expire = exp_timestamp - now_timestamp
-            
-            if seconds_to_expire < token_sdk._auto_renew_before_expiry_seconds:
-                # 尝试续订令牌
-                renew_result = token_sdk.renew_token(
-                    token=token,
-                    user_id=token_claims["user_id"],
-                    device_id=token_claims["device_id"],
-                    token_data=token_claims
-                )
-                
-                if renew_result.is_ok() and isinstance(renew_result.data, dict) and "access_token" in renew_result.data:
-                    # 设置新令牌到响应
-                    token_sdk.set_token_to_response(response, renew_result.data["access_token"])
-                    logger.debug("令牌已自动续订并设置到响应")
-
-        # 如果要求所有角色，则需要用户具备指定的角色
-        if require_roles and not UserRole.has_role(require_roles, token_claims['roles']):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="权限不足。需要指定的角色。"
-            )
-
-        return token_claims
-
-    return verified_user
-
 def create_auth_endpoints(
     app: FastAPI,
     tokens_manager: TokensManager = None,
@@ -116,6 +35,8 @@ def create_auth_endpoints(
         tokens_manager=tokens_manager,
         token_storage_method=tokens_manager.token_storage_method if tokens_manager else "cookie"
     )
+
+    require_user = token_sdk.get_auth_dependency(logger=logger)
 
     def _create_browser_device_id(request: Request) -> str:
         """为浏览器创建或获取设备ID
@@ -252,7 +173,7 @@ def create_auth_endpoints(
     async def logout_device(
         request: Request,
         response: Response,
-        token_claims: Dict[str, Any] = Depends(require_user(token_sdk, update_access_token=False, logger=logger))
+        token_claims: Dict[str, Any] = Depends(require_user)
     ):
         """退出在设备上的登录"""
         logger.debug(f"要注销的用户信息: {token_claims}")
@@ -283,7 +204,7 @@ def create_auth_endpoints(
     async def change_password(
         change_password_form: ChangePasswordRequest,
         response: Response,
-        token_claims: Dict[str, Any] = Depends(require_user(token_sdk, logger=logger))
+        token_claims: Dict[str, Any] = Depends(require_user)
     ):
         """修改密码"""
         result = users_manager.change_password(
@@ -301,7 +222,7 @@ def create_auth_endpoints(
 
     @handle_errors()
     async def get_user_profile(
-        token_claims: Dict[str, Any] = Depends(require_user(token_sdk, logger=logger))
+        token_claims: Dict[str, Any] = Depends(require_user)
     ):
         """获取当前用户信息
         
@@ -358,7 +279,7 @@ def create_auth_endpoints(
     async def update_user_profile(
         update_form: UpdateUserProfileRequest,
         response: Response,
-        token_claims: Dict[str, Any] = Depends(require_user(token_sdk, logger=logger))
+        token_claims: Dict[str, Any] = Depends(require_user)
     ):
         """更新当前用户的个人设置"""
         result = users_manager.update_user(token_claims['user_id'], **update_form.to_update)
@@ -411,55 +332,37 @@ def create_auth_endpoints(
     async def renew_token(
         request: Request,
         response: Response,
-        token_claims: Dict[str, Any] = Depends(require_user(token_sdk, update_access_token=False, logger=logger))
+        token_claims: Dict[str, Any] = Depends(require_user)
     ):
         """续订访问令牌
         
-        在访问令牌即将过期之前主动调用该接口获取新的访问令牌，
-        与通过过期的访问令牌自动刷新访问令牌不同，此方法不需要验证刷新令牌，
-        只需验证当前访问令牌有效。
+        在访问令牌即将过期之前由客户端主动调用该接口获取新的访问令牌。
+        此方法不检查刷新令牌，只要当前访问令牌有效就可以续订。
+        
+        适用场景:
+        - 客户端检测到令牌即将过期，可以主动调用此端点获取新令牌
+        - 续订发生在令牌过期之前，不同于刷新操作
+        
+        响应:
+        - 返回新的访问令牌，并根据存储策略设置到Cookie或响应体
         """
-        # 从请求中提取令牌
-        token = token_sdk.extract_token_from_request(request)
-        if not token:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="令牌不存在"
-            )
+        # 从令牌声明中获取必要信息
+        user_id = token_claims['user_id']
+        username = token_claims['username']
+        roles = token_claims['roles']
+        device_id = token_claims['device_id']
         
-        # 手动续订令牌
-        renew_result = token_sdk.renew_token(
-            token=token,
-            user_id=token_claims['user_id'],
-            device_id=token_claims['device_id'],
-            token_data=token_claims
+        # 创建新令牌
+        new_token = token_sdk.create_token(
+            user_id=user_id,
+            username=username,
+            roles=roles,
+            device_id=device_id
         )
-        
-        if renew_result.is_fail():
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=renew_result.error
-            )
-        
-        # 获取新令牌
-        new_token = None
-        if isinstance(renew_result.data, dict):
-            if "access_token" in renew_result.data:
-                new_token = renew_result.data["access_token"]
-            elif "new_token" in renew_result.data:
-                new_token = renew_result.data["new_token"]
-        
-        if not new_token:
-            # 如果没有获取到新令牌，直接创建
-            new_token = token_sdk.create_token(
-                user_id=token_claims['user_id'],
-                username=token_claims['username'],
-                roles=token_claims['roles'],
-                device_id=token_claims['device_id']
-            )
         
         # 设置新令牌到响应
         token_sdk.set_token_to_response(response, new_token)
+        logger.debug(f"令牌已续订: {username}")
         
         return {"access_token": new_token, "message": "访问令牌续订成功"}
     
@@ -472,16 +375,56 @@ def create_auth_endpoints(
         """刷新过期的访问令牌
         
         使用过期的访问令牌和存储的刷新令牌获取新的访问令牌。
-        此方法主要供其他服务调用，用于在访问令牌过期后获取新的访问令牌。
+        此API端点用于处理前端或集成应用在访问令牌过期时的自动刷新流程。
+        
+        请求方式：
+            - 浏览器客户端：可通过Cookie自动发送过期的访问令牌
+            - API客户端：可通过Authorization头部发送Bearer令牌
+            - 表单请求：可通过JSON请求体中的token字段发送令牌
+        
+        响应格式：
+            - 成功时：返回新的访问令牌，并根据令牌存储策略设置到Cookie或仅返回在响应体中
+            - 失败时：返回401错误及详细错误信息
+        
+        严格遵循以下令牌颁发流程：
+        1. 如果访问令牌过期，但没有刷新令牌存在，返回401要求重新登录
+        2. 如果访问令牌过期，但刷新令牌存在且未过期，重新颁发令牌
+        3. 如果刷新令牌不存在或已过期，返回401要求重新登录
+        
+        集成建议：
+        - 前端应用在收到401错误时，应自动调用此端点尝试刷新令牌
+        - 如果刷新失败，应引导用户重新登录
+        - 刷新成功后，应重试原请求
         """
+        # 记录请求信息，帮助诊断问题
+        logger.debug(f"收到令牌刷新请求, Cookie: {request.cookies}, Headers: {request.headers}")
+        
+        # 尝试从请求中提取令牌
+        token = token_sdk.extract_token_from_request(request)
+        if not token:
+            logger.error("刷新令牌失败: 未能从请求中提取到令牌")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="令牌不存在"
+            )
+        
+        logger.debug(f"成功从请求中提取到令牌: {token[:10]}...")
+        
         # 使用TokenSDK的方法处理令牌刷新
         result = token_sdk.handle_token_refresh(request, response)
         
+        # 如果刷新失败，返回错误
         if result.is_fail():
+            logger.error(f"刷新令牌失败: {result.error}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=result.error
             )
+        
+        # 确保令牌被设置到Cookie中（避免在handle_token_refresh中设置失败的情况）
+        if token_sdk.token_storage_method in ["cookie", "both"] and "access_token" in result.data:
+            logger.debug(f"确保将新令牌设置到Cookie中: {result.data.get('access_token', '')[:10]}...")
+            token_sdk.set_token_to_response(response, result.data["access_token"])
         
         # 根据请求类型返回不同格式的结果
         if request.headers.get("accept", "").find("application/json") >= 0:
@@ -499,7 +442,7 @@ def create_auth_endpoints(
         (HttpMethod.POST, f"{prefix}/auth/change-password", change_password),
         (HttpMethod.POST, f"{prefix}/auth/profile", update_user_profile),
         (HttpMethod.GET, f"{prefix}/auth/profile", get_user_profile),
-        (HttpMethod.POST, f"{prefix}/token/blacklist/check", check_blacklist),
+        (HttpMethod.POST, f"{prefix}/auth/blacklist/check", check_blacklist),
         (HttpMethod.POST, f"{prefix}/auth/renew-token", renew_token),
         (HttpMethod.POST, f"{prefix}/auth/refresh-token", refresh_token)
     ]

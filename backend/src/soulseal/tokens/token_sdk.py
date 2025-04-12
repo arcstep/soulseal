@@ -1,10 +1,13 @@
 from typing import Dict, Any, Optional, Union, List, Tuple, Callable
 from datetime import datetime, timedelta
+from urllib.parse import urljoin
+from fastapi import Response, HTTPException, Request
+
 import logging
 import os
 import requests
-from urllib.parse import urljoin
 
+from ..users import UserRole
 from ..models import Result
 from .token_models import (
     TokenType, TokenClaims, TokenResult,
@@ -46,7 +49,8 @@ class TokenSDK:
         jwt_secret_key=None,
         jwt_algorithm=None,
         tokens_manager=None,  # 可选的TokensManager实例
-        api_base_url=None,    # 远程API地址
+        auth_base_url=None,    # 远程API地址
+        auth_prefix="/api",    # API前缀
         auto_renew_before_expiry_seconds: int = 60,  # 提前自动续订的秒数
         token_storage_method="cookie"
     ):
@@ -54,7 +58,7 @@ class TokenSDK:
         
         根据提供的参数自动选择工作模式:
         - 如果提供了tokens_manager，则使用本地模式
-        - 如果提供了api_base_url，则使用远程模式
+        - 如果提供了auth_base_url，则使用远程模式
         - 如果两者都未提供，则使用独立模式
         - 如果两者都提供，则优先使用本地模式
         
@@ -62,7 +66,8 @@ class TokenSDK:
             jwt_secret_key: JWT密钥，如果不提供则使用环境变量FASTAPI_SECRET_KEY
             jwt_algorithm: JWT算法，如果不提供则使用默认HS256
             tokens_manager: TokensManager对象，用于本地模式下验证令牌和黑名单
-            api_base_url: 远程API基础URL，用于远程模式下验证令牌和黑名单
+            auth_base_url: 远程API基础URL，用于远程模式下验证令牌和黑名单
+            auth_prefix: API路径前缀，默认为"/api"
             auto_renew_before_expiry_seconds: 在令牌过期前多少秒自动续订
             token_storage_method: 令牌存储方式，默认为"cookie"
         """
@@ -74,21 +79,22 @@ class TokenSDK:
         
         # 设置工作模式：本地模式、远程模式或独立模式
         self._tokens_manager = tokens_manager
-        self._api_base_url = api_base_url
+        self._auth_base_url = auth_base_url
+        self._auth_prefix = auth_prefix.rstrip("/") if auth_prefix else ""
         
         # 设置令牌存储方式
         self.token_storage_method = token_storage_method
         self._logger.debug(f"令牌存储方式: {self.token_storage_method}")
         
-        if tokens_manager and api_base_url:
-            self._logger.warning("同时提供了tokens_manager和api_base_url，将优先使用tokens_manager")
+        if tokens_manager and auth_base_url:
+            self._logger.warning("同时提供了tokens_manager和auth_base_url，将优先使用tokens_manager")
             self._mode = "local"
         elif tokens_manager:
             self._mode = "local"
             self._logger.info("TokenSDK初始化为本地模式")
-        elif api_base_url:
+        elif auth_base_url:
             self._mode = "remote"
-            self._logger.info(f"TokenSDK初始化为远程模式，API地址：{api_base_url}")
+            self._logger.info(f"TokenSDK初始化为远程模式，API地址：{auth_base_url}{self._auth_prefix}")
         else:
             self._mode = "standalone"
             self._logger.warning("TokenSDK初始化为独立模式，仅提供基本的令牌验证，不支持黑名单和续订")
@@ -180,10 +186,7 @@ class TokenSDK:
         """验证JWT访问令牌有效性
         
         检查令牌的签名、有效期和是否在黑名单中。
-        根据不同的工作模式有不同的行为：
-        - 本地模式：支持令牌即将过期时自动续订，过期后自动尝试刷新
-        - 远程模式：只进行基本验证，不支持自动续订和刷新
-        - 独立模式：仅支持基本验证，不支持续订和刷新
+        简化的验证逻辑，只负责验证令牌，不自动处理续订或刷新。
         
         Args:
             token: JWT格式的访问令牌
@@ -215,88 +218,12 @@ class TokenSDK:
                     options={"verify_exp": True}
                 )
                 
-                # 在令牌验证通过的情况下，检查是否即将过期（仅本地模式）
-                if self._mode == "local" and self._tokens_manager and user_id and device_id:
-                    exp_timestamp = payload.get("exp", 0)
-                    now_timestamp = datetime.timestamp(datetime.utcnow())
-                    seconds_to_expire = exp_timestamp - now_timestamp
-                    
-                    # 如果令牌即将过期，自动续订
-                    if seconds_to_expire < self._auto_renew_before_expiry_seconds:
-                        self._logger.info(f"令牌即将过期，剩余 {seconds_to_expire} 秒，尝试自动续订: {user_id}")
-                        
-                        # 尝试续订令牌
-                        renew_result = self._tokens_manager.renew_access_token(
-                            user_id=user_id,
-                            username=unverified.get("username"),
-                            roles=unverified.get("roles"),
-                            device_id=device_id
-                        )
-                        
-                        if renew_result.is_ok():
-                            self._logger.info(f"自动续订令牌成功: {user_id}")
-                            
-                            # 确保结果中包含access_token字段
-                            if "access_token" not in renew_result.data:
-                                # 如果数据中没有access_token字段，创建一个新的结果对象
-                                return Result.ok(
-                                    data={
-                                        "access_token": self.create_token(
-                                            user_id=user_id,
-                                            username=unverified.get("username"),
-                                            roles=unverified.get("roles"),
-                                            device_id=device_id
-                                        ),
-                                        **renew_result.data
-                                    },
-                                    message="令牌自动续订成功"
-                                )
-                            
-                            return renew_result
-                        
-                        self._logger.warning(f"自动续订令牌失败: {renew_result.error}")
-                
-                # 如果不需要续订，将原始token包含在返回数据中
+                # 令牌有效，将原始token包含在返回数据中
                 payload["access_token"] = token
                 return Result.ok(data=payload)
                 
             except jwt.ExpiredSignatureError:
-                # 如果是本地模式，尝试自动刷新过期的令牌
-                if self._mode == "local" and self._tokens_manager and user_id and device_id:
-                    self._logger.info(f"本地模式下令牌已过期，尝试自动刷新: {user_id}")
-                    
-                    # 尝试使用刷新令牌获取新的访问令牌
-                    refresh_result = self._tokens_manager.refresh_access_token(
-                        user_id=user_id,
-                        username=unverified.get("username"),
-                        roles=unverified.get("roles"),
-                        device_id=device_id
-                    )
-                    
-                    if refresh_result.is_ok():
-                        self._logger.info(f"自动刷新令牌成功: {user_id}")
-                        
-                        # 确保结果中包含access_token字段
-                        if "access_token" not in refresh_result.data:
-                            # 如果数据中没有access_token字段，创建一个新的结果对象
-                            return Result.ok(
-                                data={
-                                    "access_token": self.create_token(
-                                        user_id=user_id,
-                                        username=unverified.get("username"),
-                                        roles=unverified.get("roles"),
-                                        device_id=device_id
-                                    ),
-                                    **refresh_result.data
-                                },
-                                message="令牌自动刷新成功"
-                            )
-                        
-                        return refresh_result
-                    
-                    self._logger.warning(f"自动刷新令牌失败: {refresh_result.error}")
-                
-                # 令牌过期，返回错误
+                # 令牌过期，直接返回错误
                 return Result.fail("令牌已过期")
         
         except jwt.InvalidSignatureError:
@@ -307,6 +234,25 @@ class TokenSDK:
             # 其他验证错误
             self._logger.warning(f"令牌验证错误: {str(e)}")
             return Result.fail(f"令牌验证错误: {str(e)}")
+
+    def _build_auth_url(self, path):
+        """构建认证API URL
+        
+        将auth_base_url和auth_prefix与给定路径组合，构建完整的API URL
+        
+        Args:
+            path: API路径，不包含前缀
+            
+        Returns:
+            str: 完整的API URL
+        """
+        # 确保路径不以/开头，避免urljoin问题
+        path = path.lstrip("/")
+        # 确保auth_prefix以/结尾，便于连接
+        prefix = f"{self._auth_prefix}/" if self._auth_prefix and not self._auth_prefix.endswith("/") else self._auth_prefix
+        
+        # 使用urljoin组合基础URL和路径
+        return urljoin(self._auth_base_url, f"{prefix}{path}")
 
     def renew_token(self, token: str, user_id: str, device_id: str, token_data: Dict[str, Any]) -> Result[Dict[str, Any]]:
         """在令牌即将过期时续订访问令牌
@@ -337,13 +283,23 @@ class TokenSDK:
             )
             if result.is_ok():
                 self._logger.info(f"本地模式续订令牌成功: {user_id}")
+                # 确保结果中包含access_token字段
+                if isinstance(result.data, dict) and "access_token" not in result.data:
+                    self._logger.warning("本地模式续订令牌成功但结果中缺少access_token字段，添加默认值")
+                    new_token = self.create_token(
+                        user_id=user_id,
+                        username=token_data.get("username"),
+                        roles=token_data.get("roles"),
+                        device_id=device_id
+                    )
+                    return Result.ok(data={"access_token": new_token, **result.data}, message="令牌续订成功")
                 return result
             return Result.fail(f"本地续订令牌失败: {result.error}")
             
-        elif self._mode == "remote" and self._api_base_url:
+        elif self._mode == "remote" and self._auth_base_url:
             # 使用远程API续订
             try:
-                url = urljoin(self._api_base_url, "/api/auth/renew-token")
+                url = self._build_auth_url("auth/renew-token")
                 response = requests.post(
                     url,
                     json={"token": token},
@@ -357,19 +313,42 @@ class TokenSDK:
                         new_token = data.get("data", {}).get("access_token")
                         if new_token:
                             # 解析新令牌
-                            new_token_data = jwt.decode(
-                                new_token,
-                                key=self._jwt_secret_key,
-                                algorithms=[self._jwt_algorithm],
-                                options={'verify_signature': True}
-                            )
-                            self._logger.info(f"远程模式续订令牌成功: {user_id}")
-                            return Result.ok(data=new_token_data, message="令牌续订成功")
+                            try:
+                                new_token_data = jwt.decode(
+                                    new_token,
+                                    key=self._jwt_secret_key,
+                                    algorithms=[self._jwt_algorithm],
+                                    options={'verify_signature': True}
+                                )
+                                self._logger.info(f"远程模式续订令牌成功: {user_id}")
+                                # 确保返回值包含access_token字段
+                                return Result.ok(
+                                    data={"access_token": new_token, **new_token_data}, 
+                                    message="令牌续订成功"
+                                )
+                            except Exception as e:
+                                self._logger.error(f"解析新令牌失败: {str(e)}")
+                                # 即使解析失败也返回token
+                                return Result.ok(
+                                    data={"access_token": new_token},
+                                    message="令牌续订成功但解析失败"
+                                )
                 
-                return Result.fail(f"远程续订令牌失败: {response.status_code}")
+                error_message = f"远程续订令牌失败: {response.status_code}"
+                self._logger.error(error_message)
+                try:
+                    error_data = response.json()
+                    if isinstance(error_data, dict) and "detail" in error_data:
+                        error_message = f"远程续订令牌失败: {error_data['detail']}"
+                except Exception:
+                    pass
+                
+                return Result.fail(error_message)
             
             except Exception as e:
-                return Result.fail(f"远程续订令牌错误: {str(e)}")
+                error_msg = f"远程续订令牌错误: {str(e)}"
+                self._logger.error(error_msg)
+                return Result.fail(error_msg)
         
         # 独立模式不支持续订
         return Result.fail("独立模式不支持令牌续订功能")
@@ -379,6 +358,11 @@ class TokenSDK:
         
         与renew_token不同，refresh_token用于令牌已过期的情况，
         需要使用存储的刷新令牌来获取新的访问令牌。
+        
+        严格遵循以下令牌颁发流程：
+        1. 如果访问令牌过期，但没有刷新令牌存在，返回401要求重新登录
+        2. 如果访问令牌过期，但刷新令牌存在且未过期，重新颁发令牌
+        3. 如果刷新令牌不存在或已过期，返回401要求重新登录
         
         Args:
             token: 过期的访问令牌
@@ -400,12 +384,16 @@ class TokenSDK:
             if result.is_ok():
                 self._logger.info(f"本地模式刷新令牌成功: {user_id}")
                 return result
-            return Result.fail(f"本地刷新令牌失败: {result.error}")
             
-        elif self._mode == "remote" and self._api_base_url:
+            # 刷新令牌不存在或已过期，返回错误
+            self._logger.warning(f"刷新令牌失败: {result.error}")
+            return result
+            
+        elif self._mode == "remote" and self._auth_base_url:
             # 使用远程API刷新
             try:
-                url = urljoin(self._api_base_url, "/api/auth/refresh-token")
+                url = self._build_auth_url("auth/refresh-token")
+                self._logger.debug(f"尝试远程刷新令牌: {url}")
                 response = requests.post(
                     url,
                     json={"token": token},
@@ -419,22 +407,63 @@ class TokenSDK:
                         new_token = data.get("data", {}).get("access_token")
                         if new_token:
                             # 解析新令牌
-                            new_token_data = jwt.decode(
-                                new_token,
-                                key=self._jwt_secret_key,
-                                algorithms=[self._jwt_algorithm],
-                                options={'verify_signature': True}
-                            )
-                            self._logger.info(f"远程模式刷新令牌成功: {user_id}")
-                            return Result.ok(data=new_token_data, message="令牌刷新成功")
+                            try:
+                                new_token_data = jwt.decode(
+                                    new_token,
+                                    key=self._jwt_secret_key,
+                                    algorithms=[self._jwt_algorithm],
+                                    options={'verify_signature': True}
+                                )
+                                self._logger.info(f"远程模式刷新令牌成功: {user_id}")
+                                
+                                # 确保返回结果中包含token信息
+                                # 注意：需要同时返回access_token以便caller能设置cookie
+                                return Result.ok(
+                                    data={
+                                        "access_token": new_token,
+                                        **new_token_data
+                                    }, 
+                                    message="令牌刷新成功"
+                                )
+                            except Exception as e:
+                                self._logger.error(f"解析新令牌失败: {str(e)}")
+                                # 即使解析失败也返回token，让客户端能够设置cookie
+                                return Result.ok(
+                                    data={"access_token": new_token},
+                                    message="令牌刷新成功但解析失败"
+                                )
                 
-                return Result.fail(f"远程刷新令牌失败: {response.status_code}")
+                # 刷新令牌不存在或已过期
+                if response.status_code == 401:
+                    try:
+                        error_data = response.json()
+                        error_detail = error_data.get("detail", "刷新令牌不存在或已过期")
+                    except Exception:
+                        error_detail = "刷新令牌不存在或已过期"
+                    
+                    error_message = f"刷新令牌失败，请重新登录: {error_detail}"
+                    self._logger.warning(error_message)
+                    return Result.fail(error_message)
+                
+                # 其他错误
+                error_message = f"远程刷新令牌失败: {response.status_code}"
+                self._logger.error(error_message)
+                try:
+                    error_data = response.json()
+                    if isinstance(error_data, dict) and "detail" in error_data:
+                        error_message = f"远程刷新令牌失败: {error_data['detail']}"
+                except Exception:
+                    pass
+                
+                return Result.fail(error_message)
             
             except Exception as e:
-                return Result.fail(f"远程刷新令牌错误: {str(e)}")
+                error_msg = f"远程刷新令牌错误: {str(e)}"
+                self._logger.error(error_msg)
+                return Result.fail(error_msg)
         
         # 独立模式不支持刷新
-        return Result.fail("独立模式不支持令牌刷新功能")
+        return Result.fail("独立模式不支持令牌刷新功能，请重新登录")
 
     def is_blacklisted(self, user_id: str, device_id: str) -> bool:
         """检查令牌是否在黑名单中
@@ -457,13 +486,14 @@ class TokenSDK:
             # 使用TokensManager中的黑名单
             return self._tokens_manager._token_blacklist.contains(token_id)
             
-        elif self._mode == "remote" and self._api_base_url:
+        elif self._mode == "remote" and self._auth_base_url:
             # 使用远程API检查黑名单
             try:
-                url = urljoin(self._api_base_url, "/api/auth/blacklist-check")
-                response = requests.get(
+                url = self._build_auth_url("auth/blacklist/check")
+                response = requests.post(
                     url,
-                    params={"token_id": token_id},
+                    json={"user_id": user_id, "device_id": device_id},
+                    headers={"Content-Type": "application/json"},
                     timeout=5.0
                 )
                 
@@ -506,10 +536,10 @@ class TokenSDK:
             self._tokens_manager.revoke_access_token(user_id, device_id)
             return True
             
-        elif self._mode == "remote" and self._api_base_url:
+        elif self._mode == "remote" and self._auth_base_url:
             # 使用远程API撤销
             try:
-                url = urljoin(self._api_base_url, "/api/auth/logout")
+                url = self._build_auth_url("auth/logout")
                 response = requests.post(
                     url,
                     json={"user_id": user_id, "device_id": device_id},
@@ -552,10 +582,10 @@ class TokenSDK:
             # 使用TokensManager中的黑名单
             self._tokens_manager._token_blacklist.add(token_id, expires_at)
             
-        elif self._mode == "remote" and self._api_base_url:
+        elif self._mode == "remote" and self._auth_base_url:
             # 使用远程API将令牌加入黑名单
             try:
-                url = urljoin(self._api_base_url, "/api/auth/blacklist")
+                url = self._build_auth_url("auth/blacklist")
                 response = requests.post(
                     url,
                     json={"token_id": token_id, "expires_at": expires_at.isoformat()},
@@ -694,12 +724,11 @@ class TokenSDK:
     def handle_token_refresh(self, request, response) -> Result[Dict[str, Any]]:
         """处理令牌刷新
         
-        完整封装令牌刷新流程:
+        简化的令牌刷新流程:
         1. 从请求中提取令牌
-        2. 验证令牌
-        3. 如果令牌有效但即将过期，自动续订
-        4. 如果令牌已过期，尝试使用刷新令牌
-        5. 将新令牌设置到响应中
+        2. 验证令牌是否已过期
+        3. 如果令牌已过期，尝试使用刷新令牌获取新的访问令牌
+        4. 将新令牌设置到响应中
         
         Args:
             request: HTTP请求对象
@@ -728,32 +757,20 @@ class TokenSDK:
             if not all([user_id, device_id, username, roles]):
                 return Result.fail("令牌格式无效")
             
-            # 验证令牌
-            verify_result = self.verify_token(token)
-            
-            if verify_result.is_ok():
-                # 令牌有效，检查是否即将过期
-                token_data = verify_result.data
-                exp_timestamp = token_data.get("exp", 0)
-                now_timestamp = datetime.timestamp(datetime.utcnow())
-                seconds_to_expire = exp_timestamp - now_timestamp
-                
-                # 如果即将过期，自动续订
-                if seconds_to_expire < self._auto_renew_before_expiry_seconds:
-                    self._logger.info(f"令牌即将过期，剩余 {seconds_to_expire} 秒，尝试自动续订")
-                    renew_result = self.renew_token(token, user_id, device_id, token_data)
-                    
-                    if renew_result.is_ok() and "new_token" in renew_result.data:
-                        # 设置新令牌到响应
-                        new_token = renew_result.data["new_token"]
-                        self.set_token_to_response(response, new_token)
-                        return Result.ok(data={"access_token": new_token}, message="令牌已自动续订")
-                
-                # 令牌有效且不需要续订
-                return Result.ok(data=token_data)
-            
-            elif "已过期" in verify_result.error:
+            # 验证令牌是否已过期
+            try:
+                # 验证签名和过期时间
+                jwt.decode(
+                    token,
+                    key=self._jwt_secret_key,
+                    algorithms=[self._jwt_algorithm],
+                    options={"verify_exp": True}
+                )
+                # 令牌未过期，不需要刷新
+                return Result.ok(data={"access_token": token, **unverified}, message="令牌有效，无需刷新")
+            except jwt.ExpiredSignatureError:
                 # 令牌已过期，尝试使用刷新令牌
+                self._logger.info(f"令牌已过期，尝试使用刷新令牌: {user_id}")
                 refresh_result = self.refresh_token(token, user_id, device_id, unverified)
                 
                 if refresh_result.is_ok():
@@ -761,57 +778,70 @@ class TokenSDK:
                     new_token_data = refresh_result.data
                     if isinstance(new_token_data, dict) and "access_token" in new_token_data:
                         new_token = new_token_data["access_token"]
+                        self.set_token_to_response(response, new_token)
+                        self._logger.debug(f"设置新令牌到响应: {new_token[:10]}...")
+                        return Result.ok(data=new_token_data, message="令牌已通过刷新令牌刷新")
                     else:
-                        # 创建新的访问令牌
-                        new_token = self.create_token(user_id, username, roles, device_id)
-                    
-                    self.set_token_to_response(response, new_token)
-                    return Result.ok(data={"access_token": new_token}, message="令牌已通过刷新令牌刷新")
+                        return Result.fail("刷新后的令牌无效")
                 
+                # 记录刷新失败原因
+                self._logger.error(f"刷新令牌失败: {refresh_result.error}")
                 return refresh_result
-            
-            # 其他验证失败情况
-            return verify_result
-            
+            except Exception as e:
+                # 其他验证错误
+                error_msg = f"令牌验证错误: {str(e)}"
+                self._logger.warning(error_msg)
+                return Result.fail(error_msg)
+        
         except Exception as e:
-            return Result.fail(f"处理令牌刷新失败: {str(e)}")
+            error_msg = f"处理令牌刷新失败: {str(e)}"
+            self._logger.error(error_msg)
+            return Result.fail(error_msg)
 
-    def get_token_verify_dependency(self):
-        """创建一个可用于FastAPI Depends的令牌验证函数
+    def get_auth_dependency(
+        self,
+        require_roles: Union[UserRole, List[UserRole]] = None,
+        logger: logging.Logger = None
+    ) -> Callable[[Request, Response], Dict[str, Any]]:
+        """创建一个强化的验证依赖，支持角色检查
         
-        返回一个异步函数，该函数可直接用于FastAPI的Depends装饰器，
-        简化在其他服务中集成令牌验证的过程。
+        与get_token_verify_dependency不同，此方法还支持角色验证
         
-        示例用法:
-            app = FastAPI()
-            token_sdk = TokenSDK(api_base_url="http://auth-service/")
-            verify_token = token_sdk.get_token_verify_dependency()
+        Args:
+            require_roles: 要求的角色，如果提供，用户必须具备指定角色
+            logger: 自定义日志记录器
             
-            @app.get("/protected")
-            async def protected_route(token_data = Depends(verify_token)):
-                return {"message": f"你好，{token_data['username']}!"}
-        
         Returns:
             验证函数: 可用于FastAPI Depends的异步函数
         """
-        from fastapi import Request, Response, HTTPException
-        
-        async def verify_token_dependency(request: Request, response: Response):
+        if logger is None:
+            logger = logging.getLogger(__name__)
+
+        async def auth_dependency(request: Request, response: Response):
             token = self.extract_token_from_request(request)
             if not token:
-                raise HTTPException(status_code=401, detail="未提供令牌")
+                error = "令牌不存在"
+                logger.error(error)
+                raise HTTPException(status_code=401, detail=error)
             
             verify_result = self.verify_token(token)
             if verify_result.is_fail():
+                error = f"令牌验证失败: {verify_result.error}"
+                logger.error(error)
                 raise HTTPException(status_code=401, detail=verify_result.error)
             
-            # 如果需要自动刷新或续订令牌，在响应中设置新令牌
-            if "access_token" in verify_result.data and verify_result.data["access_token"] != token:
-                self.set_token_to_response(response, verify_result.data["access_token"])
+            token_claims = verify_result.data
             
-            return verify_result.data
+            # 如果要求角色，则验证用户权限
+            if require_roles and not UserRole.has_role(require_roles, token_claims['roles']):
+                raise HTTPException(
+                    status_code=403,
+                    detail="权限不足。需要指定的角色。"
+                )
+            
+            return token_claims
         
-        return verify_token_dependency
+        return auth_dependency
 
 class TokensManager:
     """令牌管理器

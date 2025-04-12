@@ -73,7 +73,7 @@ def token_sdk_remote(mock_api_url):
     return TokenSDK(
         jwt_secret_key="test-secret-key",
         jwt_algorithm="HS256",
-        api_base_url=mock_api_url
+        auth_base_url=mock_api_url
     )
 
 
