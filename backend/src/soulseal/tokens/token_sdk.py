@@ -776,6 +776,43 @@ class TokenSDK:
         except Exception as e:
             return Result.fail(f"处理令牌刷新失败: {str(e)}")
 
+    def get_token_verify_dependency(self):
+        """创建一个可用于FastAPI Depends的令牌验证函数
+        
+        返回一个异步函数，该函数可直接用于FastAPI的Depends装饰器，
+        简化在其他服务中集成令牌验证的过程。
+        
+        示例用法:
+            app = FastAPI()
+            token_sdk = TokenSDK(api_base_url="http://auth-service/")
+            verify_token = token_sdk.get_token_verify_dependency()
+            
+            @app.get("/protected")
+            async def protected_route(token_data = Depends(verify_token)):
+                return {"message": f"你好，{token_data['username']}!"}
+        
+        Returns:
+            验证函数: 可用于FastAPI Depends的异步函数
+        """
+        from fastapi import Request, Response, HTTPException
+        
+        async def verify_token_dependency(request: Request, response: Response):
+            token = self.extract_token_from_request(request)
+            if not token:
+                raise HTTPException(status_code=401, detail="未提供令牌")
+            
+            verify_result = self.verify_token(token)
+            if verify_result.is_fail():
+                raise HTTPException(status_code=401, detail=verify_result.error)
+            
+            # 如果需要自动刷新或续订令牌，在响应中设置新令牌
+            if "access_token" in verify_result.data and verify_result.data["access_token"] != token:
+                self.set_token_to_response(response, verify_result.data["access_token"])
+            
+            return verify_result.data
+        
+        return verify_token_dependency
+
 class TokensManager:
     """令牌管理器
     
