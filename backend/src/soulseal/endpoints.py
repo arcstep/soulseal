@@ -399,8 +399,35 @@ def create_auth_endpoints(
         # 记录请求信息，帮助诊断问题
         logger.debug(f"收到令牌刷新请求, Cookie: {request.cookies}, Headers: {request.headers}")
         
-        # 尝试从请求中提取令牌
+        # 增强从请求中提取令牌的方法
+        token = None
+        
+        # 1. 从TokenSDK的标准方法中尝试提取
         token = token_sdk.extract_token_from_request(request)
+        
+        # 2. 如果上面的方法失败，从请求体中尝试提取
+        if not token and token_request and token_request.token:
+            token = token_request.token
+            logger.debug(f"从请求体中提取到令牌: {token[:10]}...")
+        
+        # 3. 从请求体的JSON数据中提取（适用于远程模式的刷新请求）
+        if not token:
+            try:
+                body = await request.json()
+                if isinstance(body, dict) and "token" in body:
+                    token = body["token"]
+                    logger.debug(f"从请求体JSON中提取到令牌: {token[:10]}...")
+            except Exception as e:
+                logger.debug(f"从请求体JSON中提取令牌失败: {str(e)}")
+        
+        # 4. 尝试从Authorization头部提取
+        if not token and "Authorization" in request.headers:
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+                logger.debug(f"从Authorization头部提取到令牌: {token[:10]}...")
+        
+        # 最终检查是否获取到令牌
         if not token:
             logger.error("刷新令牌失败: 未能从请求中提取到令牌")
             raise HTTPException(
@@ -421,15 +448,27 @@ def create_auth_endpoints(
                 detail=result.error
             )
         
-        # 确保令牌被设置到Cookie中（避免在handle_token_refresh中设置失败的情况）
-        if token_sdk.token_storage_method in ["cookie", "both"] and "access_token" in result.data:
+        # 获取令牌存储方式
+        token_storage_method = result.data.get("token_storage_method", token_sdk.token_storage_method)
+        
+        # 确保令牌被设置到Cookie中（如果存储策略需要）
+        if token_storage_method in ["cookie", "both"] and "access_token" in result.data:
             logger.debug(f"确保将新令牌设置到Cookie中: {result.data.get('access_token', '')[:10]}...")
             token_sdk.set_token_to_response(response, result.data["access_token"])
         
-        # 根据请求类型返回不同格式的结果
+        # 根据请求类型和存储策略返回不同格式的结果
         if request.headers.get("accept", "").find("application/json") >= 0:
-            # API请求，返回访问令牌
-            return result.data
+            # API请求
+            if token_storage_method == "cookie":
+                # 如果只使用cookie存储，不需要在响应体中返回令牌
+                return {"message": "访问令牌刷新成功", "token_type": "cookie"}
+            else:
+                # 返回访问令牌
+                return {
+                    "access_token": result.data.get("access_token"),
+                    "token_type": "bearer",
+                    "message": "访问令牌刷新成功"
+                }
         else:
             # 浏览器请求，只返回成功消息
             return {"message": "访问令牌刷新成功"}

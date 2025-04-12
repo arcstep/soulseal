@@ -394,17 +394,74 @@ class TokenSDK:
             try:
                 url = self._build_auth_url("auth/refresh-token")
                 self._logger.debug(f"尝试远程刷新令牌: {url}")
+                
+                # 构建请求数据，确保包含过期的访问令牌
+                request_data = {
+                    "token": token,
+                    "user_id": user_id,
+                    "device_id": device_id,
+                    # 添加token存储方式，让服务端知道如何返回令牌
+                    "token_storage_method": self.token_storage_method
+                }
+                
+                # 准备请求头和cookie
+                headers = {"Content-Type": "application/json"}
+                cookies = {}
+                
+                # 根据token存储方式调整请求
+                if self.token_storage_method in ["header", "both"]:
+                    headers["Authorization"] = f"Bearer {token}"
+                    self._logger.debug("使用header传递令牌")
+                
+                if self.token_storage_method in ["cookie", "both"]:
+                    cookies["access_token"] = token
+                    self._logger.debug("使用cookie传递令牌")
+                
+                # 记录请求详情以便调试
+                self._logger.debug(f"刷新令牌请求头: {headers}")
+                self._logger.debug(f"刷新令牌请求体: {request_data}")
+                
                 response = requests.post(
                     url,
-                    json={"token": token},
-                    headers={"Content-Type": "application/json"},
+                    json=request_data,
+                    headers=headers,
+                    cookies=cookies,
                     timeout=5.0
                 )
                 
+                self._logger.debug(f"刷新令牌响应状态: {response.status_code}")
+                
+                # 添加响应内容调试信息
+                try:
+                    response_text = response.text
+                    self._logger.debug(f"刷新令牌响应内容: {response_text}")
+                except Exception:
+                    pass
+                
                 if response.status_code == 200:
-                    data = response.json()
-                    if data.get("success", False):
-                        new_token = data.get("data", {}).get("access_token")
+                    try:
+                        # 解析响应JSON
+                        data = response.json()
+                        self._logger.debug(f"刷新令牌响应JSON: {data}")
+                        
+                        # 尝试从不同可能的响应格式中提取token
+                        new_token = None
+                        
+                        # 直接格式: {"access_token": "xxx", ...}
+                        if "access_token" in data:
+                            new_token = data["access_token"]
+                            self._logger.debug("从响应根级别提取到新令牌")
+                            
+                        # 嵌套格式: {"data": {"access_token": "xxx", ...}, ...}
+                        elif "data" in data and isinstance(data["data"], dict) and "access_token" in data["data"]:
+                            new_token = data["data"]["access_token"]
+                            self._logger.debug("从响应data字段提取到新令牌")
+                        
+                        # 如果在响应体中未找到令牌，检查响应Cookie
+                        if not new_token and hasattr(response, "cookies") and "access_token" in response.cookies:
+                            new_token = response.cookies["access_token"]
+                            self._logger.debug("从响应Cookie提取到新令牌")
+                            
                         if new_token:
                             # 解析新令牌
                             try:
@@ -416,11 +473,11 @@ class TokenSDK:
                                 )
                                 self._logger.info(f"远程模式刷新令牌成功: {user_id}")
                                 
-                                # 确保返回结果中包含token信息
-                                # 注意：需要同时返回access_token以便caller能设置cookie
+                                # 确保返回结果中包含token信息和存储方式
                                 return Result.ok(
                                     data={
                                         "access_token": new_token,
+                                        "token_storage_method": self.token_storage_method,
                                         **new_token_data
                                     }, 
                                     message="令牌刷新成功"
@@ -429,9 +486,22 @@ class TokenSDK:
                                 self._logger.error(f"解析新令牌失败: {str(e)}")
                                 # 即使解析失败也返回token，让客户端能够设置cookie
                                 return Result.ok(
-                                    data={"access_token": new_token},
+                                    data={
+                                        "access_token": new_token,
+                                        "token_storage_method": self.token_storage_method
+                                    },
                                     message="令牌刷新成功但解析失败"
                                 )
+                        else:
+                            # 响应成功但未找到新令牌
+                            error_msg = "刷新令牌成功但未找到新令牌"
+                            self._logger.warning(error_msg)
+                            return Result.fail(error_msg)
+                    except Exception as e:
+                        # JSON解析错误
+                        error_msg = f"解析刷新令牌响应失败: {str(e)}"
+                        self._logger.error(error_msg)
+                        return Result.fail(error_msg)
                 
                 # 刷新令牌不存在或已过期
                 if response.status_code == 401:
@@ -446,7 +516,7 @@ class TokenSDK:
                     return Result.fail(error_message)
                 
                 # 其他错误
-                error_message = f"远程刷新令牌失败: {response.status_code}"
+                error_message = f"远程刷新令牌失败: HTTP {response.status_code}"
                 self._logger.error(error_message)
                 try:
                     error_data = response.json()
@@ -767,7 +837,14 @@ class TokenSDK:
                     options={"verify_exp": True}
                 )
                 # 令牌未过期，不需要刷新
-                return Result.ok(data={"access_token": token, **unverified}, message="令牌有效，无需刷新")
+                return Result.ok(
+                    data={
+                        "access_token": token, 
+                        "token_storage_method": self.token_storage_method,
+                        **unverified
+                    }, 
+                    message="令牌有效，无需刷新"
+                )
             except jwt.ExpiredSignatureError:
                 # 令牌已过期，尝试使用刷新令牌
                 self._logger.info(f"令牌已过期，尝试使用刷新令牌: {user_id}")
@@ -778,8 +855,19 @@ class TokenSDK:
                     new_token_data = refresh_result.data
                     if isinstance(new_token_data, dict) and "access_token" in new_token_data:
                         new_token = new_token_data["access_token"]
-                        self.set_token_to_response(response, new_token)
-                        self._logger.debug(f"设置新令牌到响应: {new_token[:10]}...")
+                        
+                        # 获取token存储方式，优先使用返回结果中的值
+                        token_storage_method = new_token_data.get("token_storage_method", self.token_storage_method)
+                        
+                        # 根据存储方式设置令牌
+                        if token_storage_method in ["cookie", "both"]:
+                            self.set_token_to_response(response, new_token)
+                            self._logger.debug(f"设置新令牌到Cookie: {new_token[:10]}...")
+                        
+                        # 确保返回数据中包含存储方式
+                        if "token_storage_method" not in new_token_data:
+                            new_token_data["token_storage_method"] = token_storage_method
+                            
                         return Result.ok(data=new_token_data, message="令牌已通过刷新令牌刷新")
                     else:
                         return Result.fail("刷新后的令牌无效")
