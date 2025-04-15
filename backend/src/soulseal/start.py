@@ -36,7 +36,7 @@ def create_app(
     description: str,
     cors_origins: list[str],
     static_dir: str,
-    prefix: str = "/api",
+    prefix: str = "",
     jwt_secret_key: str = None,
     jwt_algorithm: str = None,
     access_token_expire_minutes: int = None,
