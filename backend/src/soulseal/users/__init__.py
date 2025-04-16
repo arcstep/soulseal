@@ -1,4 +1,4 @@
 from .users import UsersManager
-from .users_models import User, UserRole
+from .users_schemas import User, UserRole
 
 __all__ = ["UsersManager", "User", "UserRole"]

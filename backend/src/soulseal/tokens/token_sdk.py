@@ -8,8 +8,8 @@ import os
 import requests
 
 from ..users import UserRole
-from ..models import Result
-from .token_models import (
+from ..schemas import Result
+from .token_schemas import (
     TokenType, TokenClaims, TokenResult,
     JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 )

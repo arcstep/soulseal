@@ -11,7 +11,7 @@ from voidring import IndexedRocksDB
 from .http import handle_errors, HttpMethod
 from .tokens import TokensManager, TokenBlacklist, TokenClaims, TokenSDK
 from .users import UsersManager, User, UserRole
-from .models import Result
+from .schemas import Result
 
 def create_auth_endpoints(
     app: FastAPI,

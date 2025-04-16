@@ -2,8 +2,8 @@ from typing import Dict, Optional, Any, List, Tuple
 from datetime import datetime
 
 from voidring import IndexedRocksDB
-from ..models import Result
-from .users_models import User, UserRole
+from ..schemas import Result
+from .users_schemas import User, UserRole
 
 import logging
 

@@ -14,8 +14,8 @@ import pytest_asyncio
 
 from voidring import IndexedRocksDB
 from soulseal.tokens import TokensManager, TokenBlacklist, TokenSDK
-from soulseal.tokens.token_models import TokenClaims, TokenType, JWT_SECRET_KEY, JWT_ALGORITHM
-from soulseal.models import Result
+from soulseal.tokens.token_schemas import TokenClaims, TokenType, JWT_SECRET_KEY, JWT_ALGORITHM
+from soulseal.schemas import Result
 
 
 @pytest.fixture
@@ -648,7 +648,7 @@ class TestTokenSDKWithManager:
         now = datetime.utcnow()
         past_time = now - timedelta(minutes=10)
         
-        with patch('soulseal.tokens.token_models.datetime') as mock_datetime:
+        with patch('soulseal.tokens.token_schemas.datetime') as mock_datetime:
             mock_datetime.utcnow.return_value = past_time
             token_sdk_with_manager._access_token_expire_minutes = 5
             
@@ -711,7 +711,7 @@ class TestTokenSDKWithManager:
         now = datetime.utcnow()
         past_time = now - timedelta(minutes=10)
         
-        with patch('soulseal.tokens.token_models.datetime') as mock_datetime:
+        with patch('soulseal.tokens.token_schemas.datetime') as mock_datetime:
             mock_datetime.utcnow.return_value = past_time
             token_sdk_with_manager._access_token_expire_minutes = 5
             
@@ -1024,7 +1024,7 @@ class TestAuthDependency:
         now = datetime.utcnow()
         past_time = now - timedelta(minutes=10)
         
-        with patch('soulseal.tokens.token_models.datetime') as mock_datetime:
+        with patch('soulseal.tokens.token_schemas.datetime') as mock_datetime:
             mock_datetime.utcnow.return_value = past_time
             token_sdk_with_manager._access_token_expire_minutes = 5
             

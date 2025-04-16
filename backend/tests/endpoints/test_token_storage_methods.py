@@ -9,7 +9,7 @@ import logging
 
 from soulseal.tokens import TokenSDK, TokensManager, TokenBlacklist
 from soulseal.users import UsersManager
-from soulseal.models import Result
+from soulseal.schemas import Result
 from soulseal.endpoints import create_auth_endpoints
 
 # 简化的测试配置

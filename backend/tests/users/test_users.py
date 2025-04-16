@@ -8,7 +8,7 @@ import uuid
 
 from voidring import IndexedRocksDB
 from soulseal.users import UsersManager, User, UserRole
-from soulseal.models import Result
+from soulseal.schemas import Result
 
 
 @pytest.fixture

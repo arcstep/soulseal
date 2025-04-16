@@ -13,10 +13,10 @@ import json
 
 from voidring import IndexedRocksDB
 from soulseal.tokens import TokensManager, TokenBlacklist, TokenSDK
-from soulseal.tokens.token_models import TokenClaims, TokenType, JWT_SECRET_KEY, JWT_ALGORITHM
+from soulseal.tokens.token_schemas import TokenClaims, TokenType, JWT_SECRET_KEY, JWT_ALGORITHM
 from soulseal.users import UsersManager, User, UserRole
 from soulseal.endpoints import create_auth_endpoints, HttpMethod, handle_errors
-from soulseal.models import Result
+from soulseal.schemas import Result
 
 
 @pytest.fixture

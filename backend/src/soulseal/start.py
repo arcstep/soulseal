@@ -1,6 +1,6 @@
 from voidring import IndexedRocksDB
 from .tokens import TokensManager, TokenBlacklist, TokenSDK
-from .tokens.token_models import JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
+from .tokens.token_schemas import JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
 from .users import UsersManager
 from .endpoints import create_auth_endpoints
 from .__version__ import __version__
