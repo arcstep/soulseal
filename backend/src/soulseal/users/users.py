@@ -3,7 +3,7 @@ from datetime import datetime
 
 from voidring import IndexedRocksDB
 from ..schemas import Result
-from .users_schemas import User, UserRole
+from .user_schemas import User, UserRole
 
 import logging
 
