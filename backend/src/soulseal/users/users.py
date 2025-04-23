@@ -22,7 +22,7 @@ class UsersManager:
         self._logger = logging.getLogger(__name__)
 
         self._db = db
-        self._db.register_model(__USER_MODEL_NAME__, User)
+        self._db.register_collection(__USER_MODEL_NAME__, User)
         self._db.register_index(__USER_MODEL_NAME__, User, "username")
         self._db.register_index(__USER_MODEL_NAME__, User, "email")
         self._db.register_index(__USER_MODEL_NAME__, User, "mobile")
@@ -32,7 +32,7 @@ class UsersManager:
 
     def get_user(self, user_id: str) -> Optional[User]:
         """通过ID获取用户对象"""
-        user = self._db[user_id]
+        user = self._db.get_as_model(__USER_MODEL_NAME__, user_id)
         if not user:
             return None
         return user
@@ -176,7 +176,7 @@ class UsersManager:
     def ensure_admin_user(self) -> None:
         """确保管理员用户存在"""
         try:
-            admin = self._db.get(__ADMIN_USER_ID__)
+            admin = self._db.get_as_model(__USER_MODEL_NAME__, __ADMIN_USER_ID__)
             if not admin:
                 self._logger.info(f"管理员用户不存在，开始创建")
                 self.create_user(User(

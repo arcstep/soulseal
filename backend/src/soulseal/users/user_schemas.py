@@ -88,9 +88,9 @@ class User(BaseModel):
     )
 
     # 用户联系方式
-    email: EmailStr = Field(default="", description="电子邮箱")
+    email: Union[EmailStr, None, str] = Field(default=None, description="电子邮箱")
     email_verified: bool = Field(default=False, description="邮箱是否验证")
-    mobile: str = Field(default="", description="手机号")
+    mobile: Union[str, None] = Field(default=None, description="手机号")
     mobile_verified: bool = Field(default=False, description="手机号是否验证")
 
     # 用户个人资料
