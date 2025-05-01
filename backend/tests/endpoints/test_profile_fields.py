@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from voidring import IndexedRocksDB
 from soulseal.users import UsersManager, User
-from soulseal.tokens import TokensManager, TokenBlacklist
+from soulseal.tokens import TokensManager, TokenSDK, MemoryTokenBlacklist
 from soulseal.endpoints import create_auth_endpoints
 
 # 设置日志级别为DEBUG，以便观察更详细的信息
@@ -38,15 +38,26 @@ def db(temp_db_path):
 
 
 @pytest.fixture
-def token_blacklist():
-    """创建令牌黑名单"""
-    return TokenBlacklist()
+def blacklist():
+    """创建黑名单实例"""
+    return MemoryTokenBlacklist()
 
 
 @pytest.fixture
-def tokens_manager(db, token_blacklist):
+def tokens_manager(db, blacklist):
     """创建令牌管理器"""
-    return TokensManager(db, token_blacklist, token_storage_method="cookie")
+    return TokensManager(db, blacklist_provider=blacklist)
+
+
+@pytest.fixture
+def token_sdk(db, blacklist):
+    """创建令牌SDK"""
+    return TokenSDK(
+        jwt_secret_key="test-secret-key",
+        db=db,
+        auth_server=True,
+        blacklist_provider=blacklist
+    )
 
 
 @pytest.fixture
@@ -56,16 +67,15 @@ def users_manager(db):
 
 
 @pytest.fixture
-def test_app(tokens_manager, users_manager, token_blacklist):
+def test_app(token_sdk, users_manager):
     """创建测试应用"""
     app = FastAPI()
     
     # 创建认证API端点
     auth_handlers = create_auth_endpoints(
         app=app,
-        tokens_manager=tokens_manager,
+        token_sdk=token_sdk,
         users_manager=users_manager,
-        token_blacklist=token_blacklist,
         prefix="/api"
     )
     
@@ -138,27 +148,39 @@ def debug_db_state(users_manager, test_user):
 
 @pytest.fixture
 def authenticated_client(client, test_user):
-    """登录并获取已认证的客户端"""
-    logger.info("登录测试用户...")
-    # 登录请求
-    login_response = client.post(
+    """创建已认证的客户端"""
+    # 登录
+    response = client.post(
         "/api/auth/login",
         json={
             "username": test_user.username,
             "password": "password123"
         }
     )
+    assert response.status_code == 200
     
-    assert login_response.status_code == 200
-    login_data = login_response.json()
+    # 提取授权令牌
+    token = response.headers.get("Authorization", "")
+    if token.startswith("Bearer "):
+        token = token.split(" ")[1]
+    else:
+        # 如果无法从头部获取，可能是测试环境的问题，直接从响应数据中获取
+        data = response.json()
+        token = data.get("access_token", "")
     
-    # 检查登录响应中的字段
-    logger.info(f"登录响应中的用户字段: {list(login_data['user'].keys())}")
-    logger.info(f"登录响应中的display_name: '{login_data['user'].get('display_name', '')}'")
-    logger.info(f"登录响应中的bio: '{login_data['user'].get('bio', '')}'")
+    # 确保我们有token
+    assert token, "登录响应中没有获取到访问令牌"
     
-    # 保存cookie以维持会话状态
-    client.cookies = login_response.cookies
+    # 设置Authorization头用于后续请求
+    client.headers.update({"Authorization": f"Bearer {token}"})
+    
+    # 保存cookies(用于刷新令牌等)
+    client.cookies.update(response.cookies)
+    
+    print(f"登录响应: {response.json()}")
+    print(f"Authorization头: {client.headers.get('Authorization')}")
+    print(f"Cookie: {response.cookies}")
+    
     return client
 
 

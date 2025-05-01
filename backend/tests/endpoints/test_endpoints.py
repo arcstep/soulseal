@@ -12,7 +12,7 @@ import shutil
 import json
 
 from voidring import IndexedRocksDB
-from soulseal.tokens import TokensManager, TokenBlacklist, TokenSDK
+from soulseal.tokens import TokenBlacklistProvider, TokenSDK
 from soulseal.tokens.token_schemas import TokenClaims, TokenType, JWT_SECRET_KEY, JWT_ALGORITHM
 from soulseal.users import UsersManager, User, UserRole
 from soulseal.endpoints import create_auth_endpoints, HttpMethod, handle_errors
@@ -32,36 +32,26 @@ def db(temp_db_path):
     """创建测试用的RocksDB实例"""
     return IndexedRocksDB(temp_db_path)
 
-
 @pytest.fixture
-def token_blacklist():
-    """创建令牌黑名单"""
-    return TokenBlacklist()
-
-
-@pytest.fixture
-def tokens_manager(db, token_blacklist):
-    """创建令牌管理器"""
-    return TokensManager(db, token_blacklist, token_storage_method="cookie")
-
+def token_sdk(db):
+    """创建令牌SDK"""
+    return TokenSDK(db=db)
 
 @pytest.fixture
 def users_manager(db):
     """创建用户管理器"""
     return UsersManager(db)
 
-
 @pytest.fixture
-def test_app(tokens_manager, users_manager, token_blacklist):
+def test_app(token_sdk, users_manager):
     """创建测试应用"""
     app = FastAPI()
     
     # 创建认证API端点
     auth_handlers = create_auth_endpoints(
         app=app,
-        tokens_manager=tokens_manager,
+        token_sdk=token_sdk,
         users_manager=users_manager,
-        token_blacklist=token_blacklist,
         prefix="/api"
     )
     
@@ -124,14 +114,23 @@ def authenticated_client(client, registered_user):
     )
     
     assert login_response.status_code == 200
-    login_result = login_response.json()
     
-    # 保留原始客户端并附加用户信息
+    # 从Authorization头中获取令牌
+    auth_header = login_response.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        # 提取并保存令牌
+        token = auth_header.split(" ")[1]
+        client.access_token = token
+        client.headers = {"Authorization": f"Bearer {token}"}
+    else:
+        # 如果没有找到令牌，则登录失败
+        assert False, "登录响应中没有Authorization头"
+    
+    # 保存用户信息
+    client.user_info = login_response.json().get("user")
+    
+    # 保存cookies (可能用于刷新令牌)
     client.cookies = login_response.cookies
-    client.user_info = login_result.get("user")
-    
-    # 检查是否有访问令牌cookie
-    client.access_token = login_response.cookies.get("access_token")
     
     return client
 
@@ -228,14 +227,7 @@ class TestAuthEndpoints:
         assert "email" in str(result).lower() or "邮箱" in str(result)
     
     def test_login_success(self, client, registered_user):
-        """测试用户登录成功
-        
-        验证正确的用户名和密码登录:
-        1. 应返回成功结果
-        2. 响应应该设置cookie
-        3. 响应中应包含用户信息
-        4. 应该使用"cookie"作为令牌类型
-        """
+        """测试用户登录成功"""
         # 登录请求
         response = client.post(
             "/api/auth/login",
@@ -253,11 +245,12 @@ class TestAuthEndpoints:
         assert "user" in result
         assert result["user"]["username"] == registered_user["user_data"]["username"]
         
-        # 验证令牌类型为cookie
+        # 验证令牌类型
         assert result["token_type"] == "cookie"
         
-        # 验证cookie设置
-        assert "access_token" in response.cookies
+        # 验证Authorization头部包含令牌
+        assert "Authorization" in response.headers
+        assert response.headers["Authorization"].startswith("Bearer ")
     
     def test_login_failure(self, client, registered_user):
         """测试用户登录失败
@@ -433,34 +426,7 @@ class TestAuthEndpoints:
         # 验证错误消息
         assert "detail" in result
         assert "密码" in result["detail"] and ("错误" in result["detail"] or "不正确" in result["detail"])
-    
-    def test_renew_token(self, authenticated_client):
-        """测试令牌续订
         
-        验证令牌续订过程:
-        1. 应成功续订令牌
-        2. 应返回新的访问令牌
-        3. 应更新认证cookie
-        """
-        # 令牌续订请求
-        response = authenticated_client.post("/api/auth/renew-token")
-        
-        # 验证响应
-        assert response.status_code == 200
-        result = response.json()
-        
-        # 验证返回的新令牌
-        assert "access_token" in result
-        # 不比较新旧令牌，因为在测试环境中它们可能相同
-        
-        # 验证响应cookie包含令牌
-        assert "access_token" in response.cookies or "access_token" in str(response.headers).lower()
-    
-        # 使用新令牌获取用户资料
-        authenticated_client.cookies.update(response.cookies)  # 更新cookie
-        profile_response = authenticated_client.get("/api/auth/profile")
-        assert profile_response.status_code == 200
-    
     def test_unauthorized_access(self, client):
         """测试未授权访问
         
@@ -517,12 +483,16 @@ def admin_client(client, admin_user):
     assert login_response.status_code == 200
     login_result = login_response.json()
     
-    # 保留原始客户端并附加用户信息
-    client.cookies = login_response.cookies
+    # 保存用户信息
     client.user_info = login_result.get("user")
     
-    # 检查是否有访问令牌cookie
-    client.access_token = login_response.cookies.get("access_token")
+    # 保存cookies(可能用于刷新令牌等)
+    client.cookies = login_response.cookies
+    
+    # 保存并设置Authorization头
+    client.access_token = login_response.headers.get("Authorization", "").replace("Bearer ", "")
+    if client.access_token:
+        client.headers = {"Authorization": f"Bearer {client.access_token}"}
     
     return client
 
@@ -589,14 +559,8 @@ class TestTokenRefreshFlow:
     - 刷新令牌撤销后无法刷新
     """
     
-    def test_refresh_expired_token(self, client, registered_user, tokens_manager):
-        """测试刷新过期的访问令牌
-        
-        验证:
-        1. 能够登录并获取令牌
-        2. 当令牌过期时，能通过刷新令牌获取新令牌
-        3. 刷新后的令牌能正常使用
-        """
+    def test_refresh_expired_token(self, client, registered_user, token_sdk):
+        """测试刷新过期的访问令牌"""
         # 登录获取令牌
         login_response = client.post(
             "/api/auth/login",
@@ -609,86 +573,59 @@ class TestTokenRefreshFlow:
         # 验证登录成功
         assert login_response.status_code == 200
         
-        # 验证cookie中包含访问令牌
-        assert "access_token" in login_response.cookies
-        
-        # 记录原始令牌和cookie
-        original_token = login_response.cookies.get("access_token")
-        client.cookies = login_response.cookies
+        # 从授权头获取令牌，而不是cookie
+        auth_header = login_response.headers.get("Authorization", "")
+        assert auth_header.startswith("Bearer "), "授权头应该包含令牌"
+        original_token = auth_header.split(" ")[1]
         
         # 假设的用户ID和设备ID
         user_id = registered_user["response"]["data"]["user_id"]
         device_id = "test_device_id"
         
-        # 模拟令牌解码返回用户ID和设备ID
+        # 使用模拟模拟jwt.decode而不是模拟tokens_manager
         with patch('jwt.decode') as mock_decode:
-            # 设置模拟行为：不验证签名/过期时正常返回，验证时抛出过期异常
+            # 设置模拟行为
             def decode_side_effect(*args, **kwargs):
                 if kwargs.get('options', {}).get('verify_exp') is False:
-                    # 不验证过期时间时返回令牌数据
                     return {
                         "user_id": user_id,
                         "username": registered_user["user_data"]["username"],
                         "roles": ["user"],
                         "device_id": device_id,
-                        "exp": int((datetime.utcnow() - timedelta(minutes=5)).timestamp())  # 已过期
+                        "exp": int((datetime.utcnow() - timedelta(minutes=5)).timestamp())
                     }
-                # 验证过期时间时抛出异常
                 raise jwt.ExpiredSignatureError("Token expired")
             
             mock_decode.side_effect = decode_side_effect
             
-            # 模拟刷新令牌存在
-            with patch.object(tokens_manager, 'get_refresh_token') as mock_get_refresh:
-                # 创建一个有效的刷新令牌
-                refresh_token = "valid_refresh_token"
-                mock_get_refresh.return_value = refresh_token
+            # 模拟handle_token_refresh方法
+            with patch.object(token_sdk, 'handle_token_refresh') as mock_refresh:
+                mock_refresh.return_value = Result.ok(
+                    data={
+                        "access_token": "new_access_token",
+                        "user_id": user_id,
+                        "username": registered_user["user_data"]["username"],
+                        "roles": ["user"],
+                        "device_id": device_id
+                    },
+                    message="令牌刷新成功"
+                )
                 
-                # 模拟刷新访问令牌成功
-                with patch.object(tokens_manager, 'refresh_access_token') as mock_refresh:
-                    mock_refresh.return_value = Result.ok(
-                        data={
-                            "access_token": "new_access_token",
-                            "user_id": user_id,
-                            "username": registered_user["user_data"]["username"],
-                            "roles": ["user"],
-                            "device_id": device_id
-                        },
-                        message="令牌刷新成功"
-                    )
-                    
-                    # 尝试刷新令牌
-                    refresh_response = client.post("/api/auth/refresh-token")
-                    
-                    # 验证刷新成功
-                    assert refresh_response.status_code == 200, f"刷新令牌应该成功，错误: {refresh_response.json().get('detail', '')}"
-                    
-                    # 验证响应中包含成功消息
-                    result = refresh_response.json()
-                    assert result.get("message", "").find("成功") >= 0, "响应应该包含成功信息"
-                    
-                    # 验证refresh_access_token已被调用
-                    mock_refresh.assert_called_once_with(
-                        user_id=user_id,
-                        username=registered_user["user_data"]["username"],
-                        roles=["user"],
-                        device_id=device_id
-                    )
+                # 尝试刷新令牌
+                client.headers = {"Authorization": f"Bearer {original_token}"}
+                refresh_response = client.post("/api/auth/refresh-token")
+                
+                # 验证刷新成功
+                assert refresh_response.status_code == 200
+                assert mock_refresh.called
     
-    def test_refresh_with_revoked_token(self, authenticated_client, tokens_manager):
-        """测试撤销刷新令牌后无法刷新访问令牌
-        
-        验证过程:
-        1. 用户登录获取令牌
-        2. 撤销该用户的刷新令牌
-        3. 尝试刷新访问令牌
-        4. 验证刷新失败
-        """
+    def test_refresh_with_revoked_token(self, authenticated_client, token_sdk):
+        """测试撤销刷新令牌后无法刷新访问令牌"""
         # 获取用户信息
         user_info = authenticated_client.user_info
         
-        # 撤销刷新令牌
-        tokens_manager.revoke_refresh_token(
+        # 使用token_sdk撤销令牌，而不是直接调用tokens_manager
+        token_sdk.revoke_token(
             user_id=user_info["user_id"],
             device_id=user_info.get("device_id", "test_device_id")
         )
@@ -703,6 +640,88 @@ class TestTokenRefreshFlow:
         
         # 验证刷新失败
         assert refresh_response.status_code in (401, 403), "应该返回未授权或禁止访问错误"
+
+    def test_auto_token_renewal(self, authenticated_client, token_sdk):
+        """测试令牌接近过期时的自动续订功能"""
+        # 获取当前令牌
+        auth_header = authenticated_client.headers.get("Authorization", "")
+        token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+        assert token, "未找到有效令牌"
+        
+        # 解码令牌获取用户信息
+        decoded = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+        user_id = decoded["user_id"]
+        username = decoded["username"]
+        roles = decoded["roles"]
+        device_id = decoded["device_id"]
+        
+        # 计算模拟的时间戳，使令牌剩余有效期正好为总有效期的20%（低于25%阈值）
+        current_time = datetime.utcnow().timestamp()
+        total_lifetime = 60 * token_sdk._access_token_expire_minutes
+        iat_time = current_time - (0.8 * total_lifetime)
+        exp_time = iat_time + total_lifetime
+        
+        # 创建模拟即将过期的令牌
+        with patch.object(token_sdk, 'verify_token') as mock_verify:
+            mock_verify.return_value = Result.ok(data={
+                "user_id": user_id,
+                "username": username,
+                "roles": roles,
+                "device_id": device_id,
+                "iat": iat_time,
+                "exp": exp_time,
+                "access_token": token
+            })
+            
+            # 模拟创建新令牌
+            with patch.object(token_sdk, 'create_token') as mock_create_token:
+                mock_create_token.return_value = "new_renewed_token"
+                
+                # 发送请求到需要认证的端点
+                response = authenticated_client.get("/api/auth/profile")
+                
+                # 验证请求成功且创建了新令牌
+                assert response.status_code == 200
+                mock_create_token.assert_called_once()
+                assert mock_create_token.call_args[1]["user_id"] == user_id
+                
+                # 验证响应头包含新令牌
+                assert "Authorization" in response.headers
+                assert response.headers["Authorization"] == "Bearer new_renewed_token"
+
+    def test_no_renewal_for_valid_token(self, authenticated_client, token_sdk):
+        """测试令牌有效期充足时不进行自动续订"""
+        # 获取当前令牌
+        auth_header = authenticated_client.headers.get("Authorization", "")
+        token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+        
+        # 解码令牌获取用户信息
+        decoded = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+        user_id = decoded["user_id"]
+        
+        # 计算模拟的时间戳，令牌剩余有效期为总有效期的80%（远高于25%阈值）
+        current_time = datetime.utcnow().timestamp()
+        total_lifetime = 60 * token_sdk._access_token_expire_minutes
+        iat_time = current_time - (0.2 * total_lifetime)
+        exp_time = iat_time + total_lifetime
+        
+        # 创建模拟有效期充足的令牌
+        with patch.object(token_sdk, 'verify_token') as mock_verify:
+            mock_verify.return_value = Result.ok(data={
+                **decoded,
+                "iat": iat_time,
+                "exp": exp_time,
+                "access_token": token
+            })
+            
+            # 模拟create_token方法
+            with patch.object(token_sdk, 'create_token') as mock_create_token:
+                # 发送请求到需要认证的端点
+                response = authenticated_client.get("/api/auth/profile")
+                
+                # 验证请求成功且没有触发令牌续订
+                assert response.status_code == 200
+                mock_create_token.assert_not_called()
 
 
 class TestRequireUserDecorator:
@@ -741,128 +760,60 @@ class TestRequireUserDecorator:
         assert response.status_code == 200
         assert response.json() == mock_user_data
     
-    def test_blacklist_check(self, authenticated_client, tokens_manager):
-        """测试令牌撤销功能
-        
-        验证:
-        1. 登录后能访问需要认证的端点
-        2. 注销后使用同一客户端不能访问
-        """
-        # 首先验证能正常访问用户资料
+    def test_blacklist_check(self, authenticated_client, token_sdk):
+        """测试令牌撤销功能"""
+        # 先测试正常情况
         profile_response = authenticated_client.get("/api/auth/profile")
         assert profile_response.status_code == 200
         
-        # 注销用户，这会将令牌加入黑名单
-        logout_response = authenticated_client.post("/api/auth/logout")
-        assert logout_response.status_code == 200
+        # 获取令牌内容
+        auth_header = authenticated_client.headers.get("Authorization", "")
+        token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+        assert token, "未找到有效令牌"
         
-        # 清除客户端cookie，确保测试的是令牌黑名单功能
-        authenticated_client.cookies.clear()
+        # 解码令牌获取用户和设备ID
+        decoded = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+        user_id = decoded["user_id"]
+        device_id = decoded["device_id"]
         
-        # 使用已被撤销的令牌尝试访问
-        auth_header = {"Authorization": f"Bearer {authenticated_client.access_token}"}
-        profile_response = authenticated_client.get("/api/auth/profile", headers=auth_header)
+        # 保存原始headers
+        original_headers = dict(authenticated_client.headers)
+        
+        # 撤销令牌
+        token_sdk.revoke_token(user_id=user_id, device_id=device_id)
+        
+        # 创建一个新的client来避免cookie和header状态问题
+        new_client = TestClient(authenticated_client.app)
+        new_client.headers = {"Authorization": f"Bearer {token}"}
+        
+        # 使用被撤销的令牌重新发起请求
+        profile_response = new_client.get("/api/auth/profile")
         
         # 验证访问被拒绝
-        assert profile_response.status_code == 401, "撤销的令牌不应能访问受保护资源"
+        assert profile_response.status_code == 401, "撤销的令牌应该返回401"
 
-    def test_api_endpoint_auto_refresh_expired_token(self, client, authenticated_client, registered_user, tokens_manager):
-        """测试API端点对过期令牌的自动刷新功能
+    def test_token_expired_returns_401(self, authenticated_client, token_sdk):
+        """测试令牌过期时返回401错误"""
+        # 保存原始令牌
+        auth_header = authenticated_client.headers.get("Authorization", "")
+        token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+        assert token, "未找到有效令牌"
         
-        验证:
-        1. 使用已过期的令牌访问需要认证的API端点
-        2. 系统自动尝试刷新令牌而不是返回401错误
-        3. 使用刷新后的令牌成功访问API
-        
-        此测试验证了在实际API调用中，是否能正确处理令牌过期并自动刷新令牌的场景。
-        """
-        # 获取当前令牌
-        original_token = authenticated_client.cookies.get("access_token")
-        
-        # 解码JWT令牌获取用户信息
-        decoded_token = jwt.decode(
-            original_token, 
-            options={"verify_signature": False, "verify_exp": False}
-        )
-        user_id = decoded_token["user_id"]
-        username = decoded_token["username"]
-        roles = decoded_token["roles"]
-        device_id = decoded_token.get("device_id", "test_device_id")
-        
-        # 创建模拟令牌过期的场景
-        with patch('jwt.decode') as mock_decode:
-            # 模拟令牌已过期
-            def decode_side_effect(*args, **kwargs):
-                if kwargs.get("options", {}).get("verify_exp") is False:
-                    # 不验证过期时间时返回令牌数据
-                    return {
-                        "user_id": user_id,
-                        "username": username,
-                        "roles": roles,
-                        "device_id": device_id,
-                        "exp": int((datetime.utcnow() - timedelta(minutes=5)).timestamp()),  # 已过期
-                        "token_type": "access"
-                    }
-                # 验证过期时间时抛出异常
-                raise jwt.ExpiredSignatureError("Token expired")
+        # 创建和设置一个已过期的令牌
+        with patch.object(token_sdk, 'verify_token') as mock_verify:
+            # 令牌验证返回过期错误
+            mock_verify.return_value = Result.fail("令牌已过期")
             
-            mock_decode.side_effect = decode_side_effect
+            # 临时保存原始头部并设置模拟的过期令牌
+            headers_backup = authenticated_client.headers.copy()
+            authenticated_client.headers = {"Authorization": "Bearer expired-token-mock"}
             
-            # 模拟获取有效的刷新令牌
-            with patch.object(tokens_manager, 'get_refresh_token') as mock_get_refresh:
-                refresh_claims = TokenClaims.create_refresh_token(
-                    user_id=user_id,
-                    username=username,
-                    roles=roles,
-                    device_id=device_id
-                )
-                refresh_token = refresh_claims.jwt_encode()
-                mock_get_refresh.return_value = refresh_token
-                
-                # 模拟刷新访问令牌
-                with patch.object(tokens_manager, 'refresh_access_token') as mock_refresh_token:
-                    # 创建新的访问令牌
-                    new_token = jwt.encode(
-                        {
-                            "user_id": user_id,
-                            "username": username,
-                            "roles": roles,
-                            "device_id": device_id,
-                            "exp": int((datetime.utcnow() + timedelta(minutes=30)).timestamp()),
-                            "iat": int(datetime.utcnow().timestamp()),
-                            "token_type": "access"
-                        },
-                        key=JWT_SECRET_KEY,
-                        algorithm=JWT_ALGORITHM
-                    )
-                    
-                    # 设置模拟返回值
-                    mock_refresh_token.return_value = Result.ok(
-                        data={
-                            "access_token": new_token,
-                            "user_id": user_id,
-                            "username": username,
-                            "roles": roles,
-                            "device_id": device_id
-                        },
-                        message="令牌刷新成功"
-                    )
-                    
-                    # 访问需要认证的端点
-                    response = authenticated_client.get("/api/auth/profile")
-                    
-                    # 验证响应，应该成功而不是401错误
-                    assert response.status_code == 200, f"期望自动刷新令牌并返回200，实际返回{response.status_code}"
-                    
-                    # 验证refresh_access_token是否被调用
-                    mock_refresh_token.assert_called_once_with(
-                        user_id=user_id,
-                        username=username,
-                        roles=roles,
-                        device_id=device_id
-                    )
-                    
-                    # 验证返回的用户资料
-                    profile = response.json()
-                    assert profile["username"] == username
-                    assert profile["user_id"] == user_id 
+            # 尝试访问需要验证的API
+            response = authenticated_client.get("/api/auth/profile")
+            
+            # 验证返回401错误
+            assert response.status_code == 401
+            assert mock_verify.called
+            
+            # 恢复原始头部
+            authenticated_client.headers = headers_backup 

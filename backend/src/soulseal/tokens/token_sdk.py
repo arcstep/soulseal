@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional, Union, List, Tuple, Callable
 from datetime import datetime, timedelta
-from fastapi import Response, HTTPException, Request
+from fastapi import Response, HTTPException, Request, status
 
 import logging
 import os
@@ -445,56 +445,86 @@ class TokenSDK:
             self._logger.error(error_msg)
             return Result.fail(error_msg)
 
-    def get_auth_dependency(
-        self,
-        require_roles: Union[UserRole, List[UserRole]] = None,
-        logger: logging.Logger = None
-    ) -> Callable[[Request, Response], Dict[str, Any]]:
-        """创建FastAPI依赖函数进行令牌验证
+    def get_auth_dependency(self, logger=None, require_roles=None):
+        """获取认证依赖函数
         
-        在认证服务器模式下，如果令牌过期会尝试使用刷新令牌自动刷新。
-        
-        Args:
-            require_roles: 需要的角色权限
-            logger: 日志记录器
+        返回一个FastAPI依赖函数，用于验证请求中的令牌并返回令牌声明
+        同时添加自动令牌续订功能：当令牌剩余有效期低于25%时自动续订
         """
         if logger is None:
             logger = logging.getLogger(__name__)
-
-        async def auth_dependency(request: Request, response: Response):
-            # 提取访问令牌
+        
+        async def require_user(request: Request, response: Response = None):
+            # 从请求中提取令牌
             token = self.extract_token_from_request(request)
             if not token:
-                raise HTTPException(status_code=401, detail="令牌不存在")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="令牌不存在"
+                )
             
             # 验证令牌
-            verify_result = self.verify_token(token)
-            if verify_result.is_fail():
-                # 仅在认证服务器模式下尝试刷新
-                if self._auth_server and "过期" in verify_result.error:
-                    refresh_result = self.handle_token_refresh(request, response)
-                    if refresh_result.is_ok():
-                        token_claims = refresh_result.data
-                        
-                        # 检查角色权限
-                        if require_roles and not self.verify_roles(require_roles, token_claims.get('roles', [])):
-                            raise HTTPException(status_code=403, detail="权限不足")
-                        
-                        return token_claims
-                    else:
-                        raise HTTPException(status_code=401, detail=refresh_result.error)
-                else:
-                    raise HTTPException(status_code=401, detail=verify_result.error)
+            result = self.verify_token(token)
+            if result.is_fail():
+                logger.warning(f"令牌验证失败: {result.error}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=result.error
+                )
             
-            token_claims = verify_result.data
+            # 获取令牌声明
+            token_claims = result.data
             
-            # 验证角色
-            if require_roles and not self.verify_roles(require_roles, token_claims['roles']):
-                raise HTTPException(status_code=403, detail="权限不足")
+            # 如果需要特定角色，检查用户是否具有
+            if require_roles and not any(role in token_claims.get('roles', []) for role in require_roles):
+                logger.warning(f"用户无权访问: {token_claims.get('username')} 没有所需角色")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="无权访问此资源"
+                )
+            
+            # 检查黑名单
+            if self.is_blacklisted(token_claims.get('user_id'), token_claims.get('device_id')):
+                logger.warning(f"用户被列入黑名单: {token_claims.get('username')}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="令牌已被撤销"
+                )
+            
+            # 以下是新增的自动续订逻辑
+            if self._auth_server and response:
+                try:
+                    # 检查令牌是否接近过期（剩余有效期低于25%）
+                    exp_time = token_claims.get('exp', 0)
+                    iat_time = token_claims.get('iat', 0)
+                    current_time = datetime.utcnow().timestamp()
+                    
+                    # 总有效期和剩余有效期
+                    total_lifetime = exp_time - iat_time
+                    remaining_lifetime = exp_time - current_time
+                    
+                    # 如果剩余有效期低于总有效期的25%，自动续订
+                    if remaining_lifetime > 0 and remaining_lifetime < (total_lifetime * 0.25):
+                        logger.debug(f"令牌接近过期，自动续订: {token_claims.get('username')}")
+                        
+                        # 创建新的访问令牌
+                        new_token = self.create_token(
+                            user_id=token_claims.get('user_id'),
+                            username=token_claims.get('username'),
+                            roles=token_claims.get('roles'),
+                            device_id=token_claims.get('device_id')
+                        )
+                        
+                        # 设置新令牌到响应
+                        self.set_token_to_response(response, new_token)
+                        logger.info(f"访问令牌已自动续订: {token_claims.get('username')}")
+                except Exception as e:
+                    # 续订失败不影响当前请求，仅记录日志
+                    logger.warning(f"自动续订令牌失败: {str(e)}")
             
             return token_claims
         
-        return auth_dependency
+        return require_user
 
     def extend_refresh_token(self, user_id: str, device_id: str, max_absolute_lifetime_days: int = 180) -> Result[bool]:
         """延长刷新令牌有效期（滑动过期机制）
@@ -518,3 +548,19 @@ class TokenSDK:
             device_id=device_id,
             max_absolute_lifetime_days=max_absolute_lifetime_days
         )
+
+    def is_blacklisted(self, user_id: str, device_id: str) -> bool:
+        """检查令牌是否在黑名单中
+        
+        Args:
+            user_id: 用户ID
+            device_id: 设备ID
+        
+        Returns:
+            bool: 令牌是否在黑名单中
+        """
+        if not self._blacklist:
+            return False
+        
+        token_id = f"{user_id}:{device_id}"
+        return self._blacklist.contains(token_id)

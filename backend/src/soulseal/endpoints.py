@@ -9,15 +9,14 @@ import jwt
 
 from voidring import IndexedRocksDB
 from .http import handle_errors, HttpMethod
-from .tokens import TokensManager, TokenBlacklistProvider, TokenClaims, TokenSDK
+from .tokens import TokenBlacklistProvider, TokenClaims, TokenSDK
 from .users import UsersManager, User, UserRole
 from .schemas import Result
 
 def create_auth_endpoints(
     app: FastAPI,
-    tokens_manager: TokensManager = None,
-    users_manager: UsersManager = None,
-    token_blacklist: TokenBlacklistProvider = None,
+    token_sdk: TokenSDK,
+    users_manager: UsersManager,
     prefix: str="/api",
     logger: logging.Logger = None
 ) -> List[Tuple[HttpMethod, str, Callable]]:
@@ -30,12 +29,6 @@ def create_auth_endpoints(
     if logger is None:
         logger = logging.getLogger(__name__)
     
-    # 创建TokenSDK实例，以减少对TokensManager的直接依赖
-    token_sdk = TokenSDK(
-        tokens_manager=tokens_manager,
-        token_storage_method=tokens_manager.token_storage_method if tokens_manager else "cookie"
-    )
-
     require_user = token_sdk.get_auth_dependency(logger=logger)
 
     def _create_browser_device_id(request: Request) -> str:
@@ -132,7 +125,7 @@ def create_auth_endpoints(
         device_id = login_data.device_id or _create_browser_device_id(request)
 
         # 更新设备刷新令牌
-        tokens_manager.update_refresh_token(
+        token_sdk._tokens_manager.update_refresh_token(
             user_id=user_info['user_id'],
             username=user_info['username'],
             roles=user_info['roles'],
@@ -155,19 +148,11 @@ def create_auth_endpoints(
                 detail=result.error
             )
 
-        # 如果使用cookie方式，不应直接返回tokens
-        if token_sdk.token_storage_method == "cookie":
-            return {
-                "token_type": "cookie",
-                "user": user_info
-            }
-        # 如果使用header方式，可以返回access_token但建议不返回refresh_token
-        else:
-            return {
-                "access_token": result.data["access_token"],
-                "token_type": "bearer",
-                "user": user_info
-            }
+        # 直接返回用户信息和token_type，不再根据token_storage_method判断
+        return {
+            "token_type": "cookie", # 假设默认使用cookie
+            "user": user_info
+        }
 
     @handle_errors()
     async def logout_device(
@@ -179,7 +164,7 @@ def create_auth_endpoints(
         logger.debug(f"要注销的用户信息: {token_claims}")
 
         # 撤销当前设备的刷新令牌
-        tokens_manager.revoke_refresh_token(
+        token_sdk._tokens_manager.revoke_refresh_token(
             user_id=token_claims['user_id'],
             device_id=token_claims['device_id']
         )
@@ -306,96 +291,19 @@ def create_auth_endpoints(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=result.error
             )
-
-    @handle_errors()
-    async def check_blacklist(token_data: Dict[str, Any]):
-        """检查令牌是否在黑名单中"""
-        # 确保提供了必要字段
-        user_id = token_data.get("user_id")
-        device_id = token_data.get("device_id")
-        
-        if not user_id or not device_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="缺少必要的user_id或device_id字段"
-            )
-        
-        # 检查是否在黑名单中
-        is_blacklisted = token_sdk.is_blacklisted(user_id, device_id)
-        return {"is_blacklisted": is_blacklisted}
     
     class TokenRequest(BaseModel):
         """令牌请求基类"""
         token: Optional[str] = Field(None, description="访问令牌")
         
-    @handle_errors()
-    async def renew_token(
-        request: Request,
-        response: Response,
-        token_claims: Dict[str, Any] = Depends(require_user)
-    ):
-        """续订访问令牌
-        
-        在访问令牌即将过期之前由客户端主动调用该接口获取新的访问令牌。
-        此方法不检查刷新令牌，只要当前访问令牌有效就可以续订。
-        
-        适用场景:
-        - 客户端检测到令牌即将过期，可以主动调用此端点获取新令牌
-        - 续订发生在令牌过期之前，不同于刷新操作
-        
-        响应:
-        - 返回新的访问令牌，并根据存储策略设置到Cookie或响应体
-        """
-        # 从令牌声明中获取必要信息
-        user_id = token_claims['user_id']
-        username = token_claims['username']
-        roles = token_claims['roles']
-        device_id = token_claims['device_id']
-        
-        # 创建新令牌
-        new_token = token_sdk.create_token(
-            user_id=user_id,
-            username=username,
-            roles=roles,
-            device_id=device_id
-        )
-        
-        # 设置新令牌到响应
-        token_sdk.set_token_to_response(response, new_token)
-        logger.debug(f"令牌已续订: {username}")
-        
-        return {"access_token": new_token, "message": "访问令牌续订成功"}
-    
+
     @handle_errors()
     async def refresh_token(
         request: Request, 
         response: Response,
         token_request: TokenRequest = None
     ):
-        """刷新过期的访问令牌
-        
-        使用过期的访问令牌和存储的刷新令牌获取新的访问令牌。
-        此API端点用于处理前端或集成应用在访问令牌过期时的自动刷新流程。
-        
-        请求方式：
-            - 浏览器客户端：可通过Cookie自动发送过期的访问令牌
-            - API客户端：可通过Authorization头部发送Bearer令牌
-            - 表单请求：可通过JSON请求体中的token字段发送令牌
-        
-        响应格式：
-            - 成功时：返回新的访问令牌，并根据令牌存储策略设置到Cookie或仅返回在响应体中
-            - 失败时：返回401错误及详细错误信息
-        
-        严格遵循以下令牌颁发流程：
-        1. 如果访问令牌过期，但没有刷新令牌存在，返回401要求重新登录
-        2. 如果访问令牌过期，但刷新令牌存在且未过期，重新颁发令牌
-        3. 如果刷新令牌不存在或已过期，返回401要求重新登录
-        
-        集成建议：
-        - 前端应用在收到401错误时，应自动调用此端点尝试刷新令牌
-        - 如果刷新失败，应引导用户重新登录
-        - 刷新成功后，应重试原请求
-        """
+        """刷新过期的访问令牌"""
         # 记录请求信息，帮助诊断问题
         logger.debug(f"收到令牌刷新请求, Cookie: {request.cookies}, Headers: {request.headers}")
         
@@ -448,27 +356,19 @@ def create_auth_endpoints(
                 detail=result.error
             )
         
-        # 获取令牌存储方式
-        token_storage_method = result.data.get("token_storage_method", token_sdk.token_storage_method)
-        
-        # 确保令牌被设置到Cookie中（如果存储策略需要）
-        if token_storage_method in ["cookie", "both"] and "access_token" in result.data:
-            logger.debug(f"确保将新令牌设置到Cookie中: {result.data.get('access_token', '')[:10]}...")
+        # 不再依赖token_storage_method
+        if "access_token" in result.data:
             token_sdk.set_token_to_response(response, result.data["access_token"])
         
-        # 根据请求类型和存储策略返回不同格式的结果
+        # 简化响应逻辑
         if request.headers.get("accept", "").find("application/json") >= 0:
-            # API请求
-            if token_storage_method == "cookie":
-                # 如果只使用cookie存储，不需要在响应体中返回令牌
-                return {"message": "访问令牌刷新成功", "token_type": "cookie"}
-            else:
-                # 返回访问令牌
-                return {
-                    "access_token": result.data.get("access_token"),
-                    "token_type": "bearer",
-                    "message": "访问令牌刷新成功"
-                }
+            # API请求，始终返回消息
+            resp_data = {"message": "访问令牌刷新成功"}
+            # 如果结果中有access_token，也一并返回
+            if "access_token" in result.data:
+                resp_data["access_token"] = result.data["access_token"]
+                resp_data["token_type"] = "bearer"
+            return resp_data
         else:
             # 浏览器请求，只返回成功消息
             return {"message": "访问令牌刷新成功"}
@@ -481,7 +381,5 @@ def create_auth_endpoints(
         (HttpMethod.POST, f"{prefix}/auth/change-password", change_password),
         (HttpMethod.POST, f"{prefix}/auth/profile", update_user_profile),
         (HttpMethod.GET, f"{prefix}/auth/profile", get_user_profile),
-        (HttpMethod.POST, f"{prefix}/auth/blacklist/check", check_blacklist),
-        (HttpMethod.POST, f"{prefix}/auth/renew-token", renew_token),
         (HttpMethod.POST, f"{prefix}/auth/refresh-token", refresh_token)
     ]

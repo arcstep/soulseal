@@ -44,49 +44,7 @@ def _parse_args():
         default=os.environ.get("SOULSEAL_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"),
         help="CORS源列表，用逗号分隔"
     )
-    parser.add_argument(
-        "--jwt-secret-key",
-        type=str,
-        default=os.environ.get("SOULSEAL_JWT_SECRET_KEY", None),
-        help="JWT密钥"
-    )
-    parser.add_argument(
-        "--jwt-algorithm",
-        type=str,
-        default=os.environ.get("SOULSEAL_JWT_ALGORITHM", None),
-        help="JWT算法"
-    )
-    parser.add_argument(
-        "--access-token-expire-minutes",
-        type=int,
-        default=int(os.environ.get("SOULSEAL_ACCESS_TOKEN_EXPIRE_MINUTES", "0")),
-        help="访问令牌过期时间(分钟)，0表示使用默认值"
-    )
-    parser.add_argument(
-        "--refresh-token-expire-days",
-        type=int,
-        default=int(os.environ.get("SOULSEAL_REFRESH_TOKEN_EXPIRE_DAYS", "0")),
-        help="刷新令牌过期时间(天)，0表示使用默认值"
-    )
-    parser.add_argument(
-        "--api-base-url",
-        type=str,
-        default=os.environ.get("SOULSEAL_API_BASE_URL", None),
-        help="API基础URL，用于子服务调用主服务"
-    )
-    parser.add_argument(
-        "--auto-renew-before-expiry-seconds",
-        type=int,
-        default=int(os.environ.get("SOULSEAL_AUTO_RENEW_BEFORE_EXPIRY_SECONDS", "60")),
-        help="访问令牌自动续订的提前时间(秒)"
-    )
-    parser.add_argument(
-        "--token-storage-method",
-        type=str,
-        default=os.environ.get("SOULSEAL_TOKEN_STORAGE_METHOD", "cookie"),
-        choices=["cookie", "header", "both"],
-        help="访问令牌的存储方式: cookie, header, both"
-    )
+
     args = parser.parse_args()
 
     # 使用环境变量或默认值
@@ -117,14 +75,7 @@ async def main():
         description="SoulSeal API文档",
         cors_origins=cors_origins,
         static_dir=static_dir,
-        prefix=args.prefix,
-        jwt_secret_key=args.jwt_secret_key,
-        jwt_algorithm=args.jwt_algorithm,
-        access_token_expire_minutes=args.access_token_expire_minutes if args.access_token_expire_minutes > 0 else None,
-        refresh_token_expire_days=args.refresh_token_expire_days if args.refresh_token_expire_days > 0 else None,
-        api_base_url=args.api_base_url,
-        auto_renew_before_expiry_seconds=args.auto_renew_before_expiry_seconds,
-        token_storage_method=args.token_storage_method
+        prefix=args.prefix
     )
 
     # 挂载静态文件
@@ -185,12 +136,5 @@ if __name__ == "__main__":
     - SOULSEAL_PORT: 端口号，默认为8000
     - SOULSEAL_PREFIX: API路由前缀，默认为/api
     - SOULSEAL_CORS_ORIGINS: CORS源列表，默认为http://localhost:3000,http://127.0.0.1:3000
-    - SOULSEAL_JWT_SECRET_KEY: JWT密钥
-    - SOULSEAL_JWT_ALGORITHM: JWT算法
-    - SOULSEAL_ACCESS_TOKEN_EXPIRE_MINUTES: 访问令牌过期时间(分钟)
-    - SOULSEAL_REFRESH_TOKEN_EXPIRE_DAYS: 刷新令牌过期时间(天)
-    - SOULSEAL_API_BASE_URL: API基础URL
-    - SOULSEAL_AUTO_RENEW_BEFORE_EXPIRY_SECONDS: 访问令牌自动续订的提前时间(秒)，默认为60
-    - SOULSEAL_TOKEN_STORAGE_METHOD: 访问令牌的存储方式，可选值: cookie, header, both，默认为cookie
     """
     sys.exit(asyncio.run(main())) 
