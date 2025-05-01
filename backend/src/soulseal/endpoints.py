@@ -9,7 +9,7 @@ import jwt
 
 from voidring import IndexedRocksDB
 from .http import handle_errors, HttpMethod
-from .tokens import TokensManager, TokenBlacklist, TokenClaims, TokenSDK
+from .tokens import TokensManager, TokenBlacklistProvider, TokenClaims, TokenSDK
 from .users import UsersManager, User, UserRole
 from .schemas import Result
 
@@ -17,7 +17,7 @@ def create_auth_endpoints(
     app: FastAPI,
     tokens_manager: TokensManager = None,
     users_manager: UsersManager = None,
-    token_blacklist: TokenBlacklist = None,
+    token_blacklist: TokenBlacklistProvider = None,
     prefix: str="/api",
     logger: logging.Logger = None
 ) -> List[Tuple[HttpMethod, str, Callable]]:
