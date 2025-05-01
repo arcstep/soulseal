@@ -1,6 +1,8 @@
 from typing import Dict, Any, Optional, Union, List, Tuple, Callable
 from datetime import datetime, timedelta
-from fastapi import Response, HTTPException, Request, status
+from fastapi import Response, HTTPException, Request, status, Security, Depends, APIRouter
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from functools import wraps
 
 import logging
 import os
@@ -14,6 +16,14 @@ from .token_schemas import (
 )
 from .blacklist import TokenBlacklistProvider, MemoryTokenBlacklist
 from .tokens_manager import TokensManager
+
+# 创建安全方案
+security_scheme = HTTPBearer(
+    scheme_name="Bearer",
+    description="使用JWT令牌进行认证，格式: Bearer {token}",
+    bearerFormat="JWT",
+    auto_error=False
+)
 
 class TokenSDK:
     """令牌验证和管理SDK
@@ -445,6 +455,86 @@ class TokenSDK:
             self._logger.error(error_msg)
             return Result.fail(error_msg)
 
+    def create_secure_route_decorator(self, require_roles=None):
+        """创建用于保护路由的装饰器
+        
+        返回一个装饰器，该装饰器自动为路由添加认证依赖和OpenAPI安全声明
+        
+        Args:
+            require_roles: 可选的所需角色列表
+            
+        Returns:
+            装饰器函数
+        """
+        # 获取认证依赖
+        require_user = self.get_auth_dependency(require_roles=require_roles)
+        
+        def secure_route_decorator(func):
+            # 保存原始函数的信息
+            @wraps(func)
+            async def wrapper(*args, **kwargs):
+                return await func(*args, **kwargs)
+            
+            # 添加认证依赖
+            wrapper.__dependencies__ = getattr(wrapper, "__dependencies__", []) + [Depends(require_user)]
+            
+            # 添加OpenAPI安全声明 - 不使用setattr，直接设置属性
+            wrapper.openapi_extra = {"security": [{"Bearer": []}]}
+            
+            return wrapper
+        
+        return secure_route_decorator
+    
+    def secure_route(self, router: APIRouter, path: str, methods: List[str] = None, **kwargs):
+        """创建安全路由的装饰器
+        
+        这是一个包装了路由注册和安全性的装饰器，替代常规的路由装饰器。
+        使用方式：@token_sdk.secure_route(router, "/path")
+        
+        Args:
+            router: FastAPI路由器
+            path: 路由路径
+            methods: HTTP方法列表，默认为["GET"]
+            **kwargs: 传递给路由装饰器的其他参数
+        """
+        if methods is None:
+            methods = ["GET"]
+            
+        # 获取认证依赖
+        require_user = self.get_auth_dependency()
+        
+        def decorator(func):
+            # 处理依赖项 - 首先提取用户传入的依赖项
+            user_dependencies = kwargs.pop("dependencies", [])
+            
+            # 检查是否需要添加认证依赖
+            has_require_user = any(
+                getattr(dep, "__depends__", None) == require_user
+                for dep in user_dependencies
+            )
+            
+            # 合并依赖项
+            all_dependencies = list(user_dependencies)
+            if not has_require_user:
+                all_dependencies.append(Depends(require_user))
+            
+            # 设置安全声明
+            openapi_extra = kwargs.pop("openapi_extra", {})
+            openapi_extra["security"] = [{"Bearer": []}]
+            
+            # 注册路由
+            router.api_route(
+                path=path,
+                methods=methods,
+                dependencies=all_dependencies,
+                openapi_extra=openapi_extra,
+                **kwargs
+            )(func)
+            
+            return func
+        
+        return decorator
+
     def get_auth_dependency(self, logger=None, require_roles=None):
         """获取认证依赖函数
         
@@ -454,9 +544,9 @@ class TokenSDK:
         if logger is None:
             logger = logging.getLogger(__name__)
         
-        async def require_user(request: Request, response: Response = None):
+        async def require_user(response: Response = None, credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
             # 从请求中提取令牌
-            token = self.extract_token_from_request(request)
+            token = credentials.credentials if credentials else None
             if not token:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,

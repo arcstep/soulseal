@@ -4,11 +4,56 @@ from .users import UsersManager
 from .endpoints import create_auth_endpoints
 from .__version__ import __version__
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import os
+from typing import Callable, Dict, Any, List, Optional, Union
+
+def register_secure_route(
+    app: FastAPI, 
+    path: str, 
+    endpoint: Callable,
+    require_user: Callable,
+    methods: List[str] = ["GET"],
+    tags: List[str] = None,
+    **kwargs
+):
+    """注册需要认证的路由，自动添加认证依赖和OpenAPI安全声明
+    
+    Args:
+        app: FastAPI应用实例
+        path: 路由路径
+        endpoint: 路由处理函数
+        require_user: 认证依赖函数
+        methods: HTTP方法
+        tags: API标签
+        **kwargs: 其他路由参数
+    """
+    # 检查函数参数中是否已包含require_user依赖
+    has_dependency = False
+    for param in endpoint.__annotations__.values():
+        if getattr(param, "__depends__", None) == require_user:
+            has_dependency = True
+            break
+    
+    # 如果函数参数中没有require_user依赖，自动添加
+    if not has_dependency:
+        endpoint.__dependencies__ = getattr(endpoint, "__dependencies__", []) + [Depends(require_user)]
+    
+    # 添加OpenAPI安全声明
+    kwargs["openapi_extra"] = {"security": [{"Bearer": []}]}
+    
+    # 注册路由
+    app.add_api_route(
+        path=path,
+        endpoint=endpoint,
+        methods=methods,
+        tags=tags or [],
+        **kwargs
+    )
+    
+    return endpoint
 
 def mount_auth_api(app: FastAPI, prefix: str, token_sdk: TokenSDK, users_manager: UsersManager):
     # 用户管理和认证路由
@@ -18,23 +63,57 @@ def mount_auth_api(app: FastAPI, prefix: str, token_sdk: TokenSDK, users_manager
         users_manager=users_manager,
         prefix=prefix
     )
+    
+    # 确保OpenAPI组件已初始化
+    if not hasattr(app, "openapi_components") or app.openapi_components is None:
+        app.openapi_components = {"securitySchemes": {}}
+    
+    # 添加Bearer认证方案
+    app.openapi_components["securitySchemes"]["Bearer"] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+    }
+    
+    # 需要认证的路径
+    authenticated_paths = [
+        f"{prefix}/auth/logout", 
+        f"{prefix}/auth/change-password",
+        f"{prefix}/auth/profile"
+    ]
+    
+    # 获取认证依赖函数
+    require_user = token_sdk.get_auth_dependency()
+    
     for (method, path, handler) in auth_handlers:
-        app.add_api_route(
-            path=path,
-            endpoint=handler,
-            methods=[method],
-            response_model=getattr(handler, "__annotations__", {}).get("return"),
-            summary=getattr(handler, "__doc__", "").split("\n")[0] if handler.__doc__ else None,
-            description=getattr(handler, "__doc__", None),
-            tags=["Illufly Backend - Auth"])
+        # 路由参数
+        route_params = {
+            "path": path,
+            "endpoint": handler,
+            "methods": [method],
+            "response_model": getattr(handler, "__annotations__", {}).get("return"),
+            "summary": getattr(handler, "__doc__", "").split("\n")[0] if handler.__doc__ else None,
+            "description": getattr(handler, "__doc__", None),
+            "tags": ["Illufly Backend - Auth"]
+        }
+        
+        # 如果是需要认证的路径，使用register_secure_route
+        if path in authenticated_paths:
+            register_secure_route(
+                app=app,
+                require_user=require_user,
+                **route_params
+            )
+        else:
+            app.add_api_route(**route_params)
 
 def create_app(
     db_path: str,
     title: str,
     description: str,
     cors_origins: list[str],
-    static_dir: str,
-    prefix: str = ""
+    prefix: str = "",
+    include_examples: bool = False
 ):
     """启动soulseal
     
@@ -43,8 +122,8 @@ def create_app(
         title: API标题
         description: API描述
         cors_origins: CORS允许的源
-        static_dir: 静态文件目录
         prefix: API路由前缀
+        include_examples: 是否包含示例路由
     """
     # 创建 FastAPI 应用实例
     version = __version__
@@ -67,7 +146,7 @@ def create_app(
         allow_credentials=True,  # 允许携带凭证
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["Set-Cookie"]  # 暴露 Set-Cookie 头
+        expose_headers=["Authorization", "Set-Cookie"]  # 暴露头，允许前端读取
     )
 
     # 初始化数据库
@@ -81,5 +160,10 @@ def create_app(
     
     # 在挂载API时同样传递黑名单
     mount_auth_api(app, prefix, token_sdk, users_manager)
+    
+    # 添加示例路由（如果启用）
+    if include_examples:
+        from .examples.routes import create_example_routes
+        create_example_routes(app, token_sdk, prefix)
 
     return app

@@ -74,8 +74,8 @@ async def main():
         title="SoulSeal API",
         description="SoulSeal API文档",
         cors_origins=cors_origins,
-        static_dir=static_dir,
-        prefix=args.prefix
+        prefix=args.prefix,
+        include_examples=True
     )
 
     # 挂载静态文件
