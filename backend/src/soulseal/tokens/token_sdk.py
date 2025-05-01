@@ -13,6 +13,7 @@ from .token_schemas import (
     JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 )
 from .blacklist import TokenBlacklistProvider, MemoryTokenBlacklist
+from .tokens_manager import TokensManager
 
 class TokenSDK:
     """令牌验证和管理SDK
@@ -134,7 +135,7 @@ class TokenSDK:
                 )
                 
                 # 验证角色要求
-                if required_roles and not UserRole.has_role(required_roles, payload.get('roles', [])):
+                if required_roles and not self.verify_roles(required_roles, payload.get('roles', [])):
                     return Result.fail("权限不足")
                 
                 # 令牌有效
@@ -150,6 +151,34 @@ class TokenSDK:
         except Exception as e:
             self._logger.warning(f"令牌验证错误: {str(e)}")
             return Result.fail(f"令牌验证错误: {str(e)}")
+
+    def verify_roles(self, required_roles, user_roles):
+        """验证用户角色是否满足要求"""
+        # 转换为字符串列表
+        if isinstance(required_roles, str):
+            required_roles = [required_roles]
+        
+        # 确保用户角色也是列表
+        if not user_roles or not isinstance(user_roles, list):
+            return False
+        
+        # 检查每个所需角色
+        for role in required_roles:
+            # 将角色转换为UserRole枚举
+            try:
+                role_enum = UserRole(role)
+                # 对每个用户角色创建集合并检查匹配
+                for user_role in user_roles:
+                    try:
+                        user_role_enum = UserRole(user_role)
+                        if UserRole.has_role(role_enum, {user_role_enum}):
+                            return True
+                    except (ValueError, TypeError):
+                        continue
+            except (ValueError, TypeError):
+                continue
+        
+        return False
 
     def revoke_token(self, user_id: str, device_id: str, expires_at: float = None) -> bool:
         """撤销令牌 (将令牌加入黑名单并撤销刷新令牌)"""
@@ -448,7 +477,7 @@ class TokenSDK:
                         token_claims = refresh_result.data
                         
                         # 检查角色权限
-                        if require_roles and not UserRole.has_role(require_roles, token_claims.get('roles', [])):
+                        if require_roles and not self.verify_roles(require_roles, token_claims.get('roles', [])):
                             raise HTTPException(status_code=403, detail="权限不足")
                         
                         return token_claims
@@ -460,7 +489,7 @@ class TokenSDK:
             token_claims = verify_result.data
             
             # 验证角色
-            if require_roles and not UserRole.has_role(require_roles, token_claims['roles']):
+            if require_roles and not self.verify_roles(require_roles, token_claims['roles']):
                 raise HTTPException(status_code=403, detail="权限不足")
             
             return token_claims

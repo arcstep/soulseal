@@ -8,7 +8,7 @@ import time
 
 from voidring import IndexedRocksDB
 from soulseal.tokens import TokensManager
-from soulseal.tokens.token_schemas import TokenClaims, TokenType, JWT_SECRET_KEY, JWT_ALGORITHM
+from soulseal.tokens.token_schemas import TokenClaims, TokenType, JWT_SECRET_KEY, JWT_ALGORITHM, get_current_timestamp
 from soulseal.tokens.blacklist import MemoryTokenBlacklist
 
 @pytest.fixture
@@ -146,11 +146,9 @@ class TestTokensManager:
         original_exp = original_decoded["exp"]
         
         # 延长令牌有效期
-        with patch('datetime.datetime') as mock_datetime:
-            # 模拟时间前进一天
-            new_time = datetime.utcnow() + timedelta(days=1)
-            mock_datetime.utcnow.return_value = new_time
-            
+        with patch('soulseal.tokens.token_schemas.get_current_timestamp') as mock_time:
+            fixed_time = time.time() + 86400  # 当前时间加一天
+            mock_time.return_value = fixed_time
             result = tokens_manager.extend_refresh_token(
                 user_id=user_data["user_id"],
                 device_id=user_data["device_id"]
@@ -256,7 +254,8 @@ class TestTokensManager:
         
         # 将用户令牌加入黑名单
         token_id = f"{user_data['user_id']}:{user_data['device_id']}"
-        real_blacklist.add(token_id, datetime.utcnow() + timedelta(hours=1))
+        future_time = get_current_timestamp() + 3600  # 当前时间加1小时
+        real_blacklist.add(token_id, future_time)
         
         # 验证令牌确实在黑名单中
         assert real_blacklist.contains(token_id) == True
@@ -335,7 +334,8 @@ class TestTokensManager:
         tokens_manager.update_refresh_token(**user_data)
         
         token_id = f"{user_data['user_id']}:{user_data['device_id']}"
-        real_blacklist.add(token_id, datetime.utcnow() + timedelta(hours=1))
+        future_time = get_current_timestamp() + 3600  # 当前时间加1小时
+        real_blacklist.add(token_id, future_time)
         
         result = tokens_manager.renew_access_token(**user_data)
         
@@ -352,7 +352,8 @@ class TestTokensManager:
         
         # 将用户令牌加入黑名单
         token_id = f"{user_data['user_id']}:{user_data['device_id']}"
-        real_blacklist.add(token_id, datetime.utcnow() + timedelta(hours=1))
+        future_time = get_current_timestamp() + 3600  # 当前时间加1小时
+        real_blacklist.add(token_id, future_time)
         
         # 只传入必要的参数
         result = tokens_manager.extend_refresh_token(
@@ -366,35 +367,25 @@ class TestTokensManager:
 
     def test_extend_refresh_token_max_lifetime(self, tokens_manager, user_data):
         """测试刷新令牌最大绝对有效期限制"""
-        # 直接修改代码中的逻辑，强制使令牌超出绝对时限
-        with patch('soulseal.tokens.tokens_manager.datetime') as mock_datetime:
-            # 设置初始时间为明确的日期
+        with patch('soulseal.tokens.token_schemas.get_current_timestamp') as mock_time:
+            # 设置初始时间
             initial_timestamp = 1672574400.0  # 2023-01-01 12:00:00
-            mock_dt1 = MagicMock()
-            mock_dt1.timestamp.return_value = initial_timestamp
-            mock_datetime.utcnow.return_value = mock_dt1
+            mock_time.return_value = initial_timestamp
             
             # 创建初始令牌
             tokens_manager.update_refresh_token(**user_data)
             
-            # 直接设置令牌的first_issued_at
+            # 获取令牌并修改它的过期时间和首次发行时间
             token_key = TokenClaims.get_refresh_token_key(user_data["user_id"], user_data["device_id"])
             token_claims = tokens_manager._cache.get(token_key)
+            
+            # 修改令牌有效期为一年后，这样不会因过期而失败
+            token_claims.exp = initial_timestamp + (365 * 86400)  # 设置过期时间为一年后
             token_claims.first_issued_at = initial_timestamp
             tokens_manager._cache.put(token_key, token_claims)
             
-            # 改为使用原始方法进行比较，但使用强制设置的值
-            def mock_compare(a, b):
-                if isinstance(b, float) and b == initial_timestamp + (180 * 86400):
-                    return True  # 让任何与最大绝对时间的比较返回"已过期"
-                return False
-            
-            # 设置未来时间（超过最大有效期）
-            future_timestamp = initial_timestamp + (190 * 86400)  # 190天后
-            mock_dt2 = MagicMock()
-            mock_dt2.timestamp.return_value = future_timestamp
-            mock_dt2.__gt__ = mock_compare  # 关键：强制比较结果
-            mock_datetime.utcnow.return_value = mock_dt2
+            # 模拟时间流逝到181天后（超过最大有效期但未超过令牌过期时间）
+            mock_time.return_value = initial_timestamp + (181 * 86400)
             
             # 尝试延长
             result = tokens_manager.extend_refresh_token(
@@ -403,6 +394,5 @@ class TestTokensManager:
                 max_absolute_lifetime_days=180
             )
         
-        # 应该失败
         assert result.is_fail()
         assert "超过最大" in result.error

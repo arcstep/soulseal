@@ -11,13 +11,14 @@ import os
 import jwt
 import logging
 import uuid
+import time
 
 from ..schemas import Result
 from .token_schemas import (
     TokenType, TokenClaims, TokenResult,
-    JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
+    JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS,
+    get_current_timestamp, get_expires_timestamp
 )
-from .token_sdk import TokenSDK
 from .blacklist import TokenBlacklistProvider, MemoryTokenBlacklist, RedisTokenBlacklist
 
 __JWT_SECRET_KEY__ = os.getenv("FASTAPI_SECRET_KEY", "MY-SECRET-KEY")
@@ -214,7 +215,7 @@ class TokensManager:
             device_id: 设备ID
         """
         token_id = f"{user_id}:{device_id}"
-        expires_at = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+        expires_at = get_expires_timestamp(days=REFRESH_TOKEN_EXPIRE_DAYS)
         self._token_blacklist.add(token_id, expires_at)
         self._logger.info(f"访问令牌已撤销并加入黑名单: {token_id}")
         
@@ -236,22 +237,24 @@ class TokensManager:
             self._logger.warning(f"刷新令牌不存在: {user_id}:{device_id}")
             return Result.fail("刷新令牌不存在")
         
-        # 检查是否已过期
-        now = datetime.utcnow().timestamp()
-        if now > token_claims.exp:
-            self._logger.warning(f"刷新令牌已过期: {user_id}:{device_id}")
-            return Result.fail("刷新令牌已过期")
+        # 获取当前时间
+        now = get_current_timestamp()
         
         # 获取或设置首次颁发时间
         if not hasattr(token_claims, "first_issued_at") or token_claims.first_issued_at is None:
             token_claims.first_issued_at = token_claims.iat
         
-        # 计算最大绝对过期时间 (天数转换为秒)
+        # 1. 先检查最大绝对有效期 - 调整顺序
         max_absolute_expiry = token_claims.first_issued_at + (max_absolute_lifetime_days * 86400)
         
         if now > max_absolute_expiry:
             self._logger.warning(f"刷新令牌已超过最大绝对有效期({max_absolute_lifetime_days}天)")
             return Result.fail(f"刷新令牌已超过最大有效期({max_absolute_lifetime_days}天)，请重新登录")
+        
+        # 2. 再检查是否已过期
+        if now > token_claims.exp:
+            self._logger.warning(f"刷新令牌已过期: {user_id}:{device_id}")
+            return Result.fail("刷新令牌已过期")
         
         # 延长有效期，但不超过最大绝对有效期
         new_exp = now + (REFRESH_TOKEN_EXPIRE_DAYS * 86400)

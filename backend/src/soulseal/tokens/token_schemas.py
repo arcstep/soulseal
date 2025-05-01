@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, ConfigDict
 import os
 import uuid
 import jwt
+import time
 
 # 从环境变量读取配置，确保在所有地方使用相同的配置
 JWT_SECRET_KEY = os.getenv("FASTAPI_SECRET_KEY", "MY-SECRET-KEY")
@@ -24,6 +25,17 @@ class TokenType(str, Enum):
     """令牌类型"""
     ACCESS = "access"
     REFRESH = "refresh"
+
+
+def get_current_timestamp() -> float:
+    """获取当前时间戳，所有时间获取都应使用此方法"""
+    return time.time()
+    
+def get_expires_timestamp(days: int = 0, minutes: int = 0, seconds: int = 0) -> float:
+    """计算未来某个时间点的时间戳"""
+    total_seconds = (days * 86400) + (minutes * 60) + seconds
+    return get_current_timestamp() + total_seconds
+
 
 # 令牌声明基本模型
 class TokenClaims(BaseModel):
@@ -41,25 +53,25 @@ class TokenClaims(BaseModel):
     @classmethod
     def create_refresh_token(cls, user_id: str, username: str, roles: List[str], device_id: str = None, **kwargs) -> Self:
         """创建刷新令牌"""
-        now = datetime.utcnow().timestamp()  # 使用时间戳
+        iat = kwargs.get('iat', get_current_timestamp())
+        exp = kwargs.get('exp', get_expires_timestamp(days=REFRESH_TOKEN_EXPIRE_DAYS))
+        
         return cls(
             token_type=TokenType.REFRESH,
             user_id=user_id,
             username=username,
             roles=roles,
             device_id=device_id,
-            iat=now,
-            first_issued_at=now,  # 记录首次颁发时间
-            exp=now + (REFRESH_TOKEN_EXPIRE_DAYS * 86400)  # 天数转换为秒
+            iat=iat,
+            first_issued_at=iat,
+            exp=exp
         )
 
     @classmethod
     def create_access_token(cls, user_id: str, username: str, roles: List[str], device_id: str = None, **kwargs) -> Self:
         """创建访问令牌"""
-        # 使用当前时间或kwargs中的iat
-        iat = kwargs.get('iat', datetime.utcnow().timestamp())
-        # 使用默认过期时间或kwargs中的exp
-        exp = kwargs.get('exp', iat + (ACCESS_TOKEN_EXPIRE_MINUTES * 60))  # 分钟转换为秒
+        iat = kwargs.get('iat', get_current_timestamp())
+        exp = kwargs.get('exp', get_expires_timestamp(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
         
         return cls(
             token_type=TokenType.ACCESS,
@@ -79,8 +91,8 @@ class TokenClaims(BaseModel):
     # 根据设备的令牌信息    
     token_type: TokenType = Field(..., description="令牌类型")
     device_id: str = Field(default_factory=lambda: f"device_{uuid.uuid4().hex[:8]}", description="设备ID")
-    iat: float = Field(default_factory=lambda: datetime.utcnow().timestamp(), description="令牌创建时间(时间戳)")
-    exp: float = Field(default_factory=lambda: datetime.utcnow().timestamp(), description="令牌过期时间(时间戳)")
+    iat: float = Field(default_factory=lambda: get_current_timestamp(), description="令牌创建时间(时间戳)")
+    exp: float = Field(default_factory=lambda: get_current_timestamp(), description="令牌过期时间(时间戳)")
 
     # 用户信息
     user_id: str = Field(..., description="用户唯一标识")
@@ -106,7 +118,7 @@ class TokenClaims(BaseModel):
     def is_expired(self, current_time: Optional[float] = None) -> bool:
         """检查令牌是否已过期"""
         if current_time is None:
-            current_time = datetime.utcnow().timestamp()
+            current_time = get_current_timestamp()
         return current_time > self.exp
 
 # 令牌操作结果类型定义
