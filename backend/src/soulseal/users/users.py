@@ -132,9 +132,8 @@ class UsersManager:
     def list_users(self) -> List[Dict[str, Any]]:
         """列出所有用户"""
         users = []
-        for user_id in self._db.iter_model_keys(__USER_MODEL_NAME__):
-            if user := self._db[user_id]:
-                users.append(user)
+        for (user_id, user) in self._db.iter_collection(__USER_MODEL_NAME__):
+            users.append(user)
         return users
     
     def change_password(self, user_id: str, current_password: str, new_password: str) -> Result[None]:
