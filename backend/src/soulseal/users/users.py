@@ -191,3 +191,30 @@ class UsersManager:
                 
         except Exception as e:
             raise
+
+    def lock_user(self, user_id: str) -> Result[Dict[str, Any]]:
+        """锁定用户账户"""
+        try:
+            user = self.get_user(user_id)
+            if not user:
+                return Result.fail("用户不存在")
+                
+            user.is_locked = True
+            self._db.update_with_indexes(__USER_MODEL_NAME__, user.user_id, user)
+            return Result.ok(data=user.model_dump(exclude={"password_hash"}))
+        except Exception as e:
+            return Result.fail(f"锁定用户失败: {str(e)}")
+
+    def unlock_user(self, user_id: str) -> Result[Dict[str, Any]]:
+        """解锁用户账户"""
+        try:
+            user = self.get_user(user_id)
+            if not user:
+                return Result.fail("用户不存在")
+                
+            user.is_locked = False
+            user.failed_login_attempts = 0  # 重置失败次数
+            self._db.update_with_indexes(__USER_MODEL_NAME__, user.user_id, user)
+            return Result.ok(data=user.model_dump(exclude={"password_hash"}))
+        except Exception as e:
+            return Result.fail(f"解锁用户失败: {str(e)}")

@@ -31,6 +31,11 @@ def create_auth_endpoints(
     
     require_user = token_sdk.get_auth_dependency(logger=logger)
 
+    # 创建管理员专用认证依赖
+    require_admin = token_sdk.get_auth_dependency(
+        require_roles=[UserRole.ADMIN]
+    )
+
     def _create_browser_device_id(request: Request) -> str:
         """为浏览器创建或获取设备ID
         
@@ -315,7 +320,49 @@ def create_auth_endpoints(
             # 浏览器请求，只返回成功消息
             return {"message": "访问令牌刷新成功"}
             
-    
+    @handle_errors()
+    async def list_all_users(
+        token_claims: Dict[str, Any] = Depends(require_admin)
+    ):
+        """获取所有用户列表（仅管理员）"""
+        users_list = users_manager.list_users()
+        # 排除敏感信息
+        return [user.model_dump(exclude={"password_hash"}) for user in users_list]
+
+    class UserActionRequest(BaseModel):
+        """用户操作请求"""
+        user_id: str = Field(..., description="用户ID")
+
+    @handle_errors()
+    async def lock_user(
+        request: UserActionRequest,
+        token_claims: Dict[str, Any] = Depends(require_admin)
+    ):
+        """锁定用户（仅管理员）"""
+        result = users_manager.lock_user(request.user_id)
+        if result.is_ok():
+            return {"message": f"用户 {request.user_id} 已锁定", "user": result.data}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.error
+            )
+
+    @handle_errors()
+    async def unlock_user(
+        request: UserActionRequest,
+        token_claims: Dict[str, Any] = Depends(require_admin)
+    ):
+        """解锁用户（仅管理员）"""
+        result = users_manager.unlock_user(request.user_id)
+        if result.is_ok():
+            return {"message": f"用户 {request.user_id} 已解锁", "user": result.data}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.error
+            )
+
     return [
         (HttpMethod.POST, f"{prefix}/auth/register", register),
         (HttpMethod.POST, f"{prefix}/auth/login", login),
@@ -323,5 +370,8 @@ def create_auth_endpoints(
         (HttpMethod.POST, f"{prefix}/auth/change-password", change_password),
         (HttpMethod.POST, f"{prefix}/auth/profile", update_user_profile),
         (HttpMethod.GET, f"{prefix}/auth/profile", get_user_profile),
-        (HttpMethod.POST, f"{prefix}/auth/refresh-token", refresh_token)
+        (HttpMethod.POST, f"{prefix}/auth/refresh-token", refresh_token),
+        (HttpMethod.GET, f"{prefix}/admin/users", list_all_users),
+        (HttpMethod.POST, f"{prefix}/admin/users/lock", lock_user),
+        (HttpMethod.POST, f"{prefix}/admin/users/unlock", unlock_user)
     ]
