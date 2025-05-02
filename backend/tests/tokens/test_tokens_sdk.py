@@ -65,7 +65,7 @@ class TestAuthServerSDK:
     
     def test_create_token(self, auth_server_sdk, user_data):
         """测试创建访问令牌"""
-        token = auth_server_sdk.create_token(
+        token = auth_server_sdk._create_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
@@ -84,7 +84,7 @@ class TestAuthServerSDK:
     
     def test_verify_token(self, auth_server_sdk, user_data):
         """测试验证访问令牌"""
-        token = auth_server_sdk.create_token(
+        token = auth_server_sdk._create_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
@@ -99,7 +99,7 @@ class TestAuthServerSDK:
     def test_blacklist_integration(self, auth_server_sdk, user_data, blacklist):
         """测试黑名单与SDK集成"""
         # 创建令牌
-        token = auth_server_sdk.create_token(
+        token = auth_server_sdk._create_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
@@ -121,7 +121,7 @@ class TestAuthServerSDK:
     def test_extend_refresh_token(self, auth_server_sdk, user_data):
         """测试延长刷新令牌有效期"""
         # 创建刷新令牌
-        auth_server_sdk._tokens_manager.update_refresh_token(
+        auth_server_sdk._update_refresh_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
@@ -139,7 +139,7 @@ class TestAuthServerSDK:
     def test_handle_token_refresh_with_refresh_token(self, auth_server_sdk, user_data):
         """测试使用刷新令牌刷新访问令牌"""
         # 创建刷新令牌
-        refresh_claims = auth_server_sdk._tokens_manager.update_refresh_token(
+        refresh_claims = auth_server_sdk._update_refresh_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
@@ -147,7 +147,7 @@ class TestAuthServerSDK:
         )
         # 创建请求和响应模拟
         mock_request = MagicMock()
-        refresh_token = refresh_claims.jwt_encode()
+        refresh_token = refresh_claims.data.jwt_encode()
         mock_request.cookies = {"refresh_token": refresh_token}
         mock_response = MagicMock()
 
@@ -172,10 +172,10 @@ class TestAuthServerSDK:
     def test_token_sdk_auth_mode_integration(self, auth_server_sdk, user_data):
         """测试认证服务器模式下的完整流程：创建、刷新、撤销"""
         # 1. 创建访问令牌
-        access_token = auth_server_sdk.create_token(**user_data)
+        access_token = auth_server_sdk._create_token(**user_data)
         
         # 2. 为用户创建刷新令牌
-        auth_server_sdk._tokens_manager.update_refresh_token(**user_data)
+        auth_server_sdk._update_refresh_token(**user_data)
         
         # 创建模拟请求和响应
         mock_request = MagicMock()
@@ -223,7 +223,7 @@ class TestAuthServerSDK:
             # 设置非常短的过期时间
             auth_server_sdk._access_token_expire_minutes = 0.01
             
-            token = auth_server_sdk.create_token(**user_data)
+            token = auth_server_sdk._create_token(**user_data)
         
         # 模拟时间前进
         with patch('soulseal.tokens.token_schemas.get_current_timestamp',
@@ -249,7 +249,7 @@ class TestAuthServerSDK:
     def test_invalid_token_signature(self, auth_server_sdk, user_data):
         """测试签名无效的令牌"""
         # 创建令牌
-        token = auth_server_sdk.create_token(
+        token = auth_server_sdk._create_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
@@ -269,7 +269,7 @@ class TestAuthServerSDK:
     def test_extract_token_from_request(self, auth_server_sdk, user_data):
         """测试从请求中提取令牌"""
         # 创建令牌
-        token = auth_server_sdk.create_token(
+        token = auth_server_sdk._create_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
@@ -299,7 +299,7 @@ class TestAuthServerSDK:
     def test_set_token_to_response(self, auth_server_sdk, user_data):
         """测试将令牌设置到响应"""
         # 创建令牌
-        token = auth_server_sdk.create_token(
+        token = auth_server_sdk._create_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
@@ -327,7 +327,8 @@ class TestAuthServerSDK:
             httponly=True,
             secure=True,
             samesite="Lax",
-            max_age=mock.ANY  # 不验证具体过期时间
+            max_age=mock.ANY,
+            path='/api/auth'
         )
 
     def test_missing_token(self, auth_server_sdk):
@@ -346,7 +347,7 @@ class TestAuthServerSDK:
     def test_cross_mode_compatibility(self, auth_server_sdk, client_sdk, user_data):
         """测试客户端能验证认证服务器创建的令牌"""
         # 认证服务器创建令牌
-        token = auth_server_sdk.create_token(**user_data)
+        token = auth_server_sdk._create_token(**user_data)
         
         # 客户端验证令牌
         result = client_sdk.verify_token(token)
@@ -359,7 +360,7 @@ class TestClientSDK:
     
     def test_create_token(self, client_sdk, user_data):
         """测试创建访问令牌"""
-        token = client_sdk.create_token(
+        token = client_sdk._create_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
@@ -385,7 +386,7 @@ class TestClientSDK:
             mock_time.return_value = past_time.timestamp()
             
             client_sdk._access_token_expire_minutes = 0.01
-            token = client_sdk.create_token(**user_data)
+            token = client_sdk._create_token(**user_data)
 
         # 测试时确保时间前进
         with patch('time.time', return_value=time.time() + 10):
@@ -397,7 +398,7 @@ class TestClientSDK:
     def test_client_mode_blacklist(self, client_sdk, user_data, blacklist):
         """测试客户端模式下的黑名单功能"""
         # 创建令牌
-        token = client_sdk.create_token(
+        token = client_sdk._create_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
@@ -436,7 +437,7 @@ class TestClientSDK:
             mock_time.return_value = past_time.timestamp()
             
             client_sdk._access_token_expire_minutes = 0.01
-            token = client_sdk.create_token(**user_data)
+            token = client_sdk._create_token(**user_data)
         
         # 测试时确保时间前进
         with patch('time.time', return_value=time.time() + 10):
@@ -455,7 +456,7 @@ class TestClientSDK:
 
     def test_client_invalid_token_signature(self, client_sdk, user_data):
         """测试客户端模式下签名被篡改的令牌"""
-        token = client_sdk.create_token(**user_data)
+        token = client_sdk._create_token(**user_data)
         tampered_token = token[:-1] + ('a' if token[-1] != 'a' else 'b')
         
         result = client_sdk.verify_token(tampered_token)
@@ -465,7 +466,7 @@ class TestClientSDK:
 
     def test_client_extract_token_from_request(self, client_sdk, user_data):
         """测试客户端模式下从请求提取令牌"""
-        token = client_sdk.create_token(**user_data)
+        token = client_sdk._create_token(**user_data)
         
         mock_request = MagicMock()
         mock_request.headers = {"Authorization": f"Bearer {token}"}
@@ -483,7 +484,7 @@ class TestClientSDK:
 
     def test_client_role_verification(self, client_sdk, user_data):
         """测试客户端模式下角色验证"""
-        token = client_sdk.create_token(**user_data)
+        token = client_sdk._create_token(**user_data)
         
         # 测试用户具有的角色
         result = client_sdk.verify_token(token, required_roles=["user"])

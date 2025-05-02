@@ -14,9 +14,9 @@ poetry add soulseal
 
 ## 快速开始
 
-### 作为独立服务启动
+### 命令行启动示例路由
 
-这种方式非常适合你验证 API 的使用方式。
+通常你不会这样使用，但启动后的 Swagger 文档（通常在`/docs`）很方便你直观了解 API 结构。
 
 ```bash
 # 直接使用Python模块运行
@@ -25,19 +25,7 @@ poetry run python -m soulseal
 # 指定主机和端口
 poetry run python -m soulseal --host 0.0.0.0 --port 8080
 
-# 使用环境变量配置
-SOULSEAL_DATA_DIR=/path/to/data SOULSEAL_PORT=8080 poetry run python -m soulseal
 ```
-
-### 命令行参数
-
-| 参数 | 环境变量 | 说明 | 默认值 |
-|-----|---------|------|-------|
-| --data-dir | SOULSEAL_DATA_DIR | 数据目录 | ~/.soulseal |
-| --host | SOULSEAL_HOST | 主机地址 | 127.0.0.1 |
-| --port | SOULSEAL_PORT | 端口 | 8000 |
-| --prefix | SOULSEAL_PREFIX | API前缀 | /api |
-| --cors-origins | SOULSEAL_CORS_ORIGINS | CORS源列表（逗号分隔）| http://localhost:3000,... |
 
 ## 设计理念
 
@@ -46,12 +34,15 @@ SoulSeal 采用现代化的身份认证架构设计：
 1. **JWT身份验证**：使用行业标准的JWT令牌进行身份验证和授权
 2. **令牌分离设计**：
    - **访问令牌（Access Token）**：短期有效（默认5分钟），存储在内存中，用于API请求认证
-   - **刷新令牌（Refresh Token）**：长期有效（默认7天），存储在HTTP-only Cookie中，用于获取新的访问令牌
+   - **刷新令牌（Refresh Token）**：长期有效（默认30天），存储在HTTP-only Cookie中，用于获取新的访问令牌
 3. **无感续订机制**：当访问令牌剩余有效期低于25%时，系统自动续订令牌
 4. **黑名单机制**：支持令牌撤销，即使令牌未过期也能立即失效
 5. **多设备支持**：同一用户可在多设备同时登录，每个设备使用独立的令牌
 6. **内置用户管理**：集成了简单的用户管理模块
 7. **基于角色的访问控制**：支持细粒度的权限管理
+
+使用 JWT 令牌是前后端分离应用的最佳实践，因为访问令牌是自包含的，在内存中可以完成快速解析，不会对性能形成阻塞。
+而定期使用刷新令牌重新颁发访问令牌平衡了安全性。
 
 ## API端点
 
@@ -64,7 +55,7 @@ SoulSeal提供以下API端点（假设前缀为`/api`）：
 | `/api/auth/logout` | POST | 用户退出 | 是 |
 | `/api/auth/change-password` | POST | 修改密码 | 是 |
 | `/api/auth/profile` | GET/POST | 获取/更新用户信息 | 是 |
-| `/api/auth/refresh-token` | POST | 刷新访问令牌（令牌过期时） | 否 |
+| `/api/auth/refresh-token` | POST | 刷新访问令牌（令牌过期丢失或过期时） | 否 |
 
 ## 在FastAPI应用中集成
 

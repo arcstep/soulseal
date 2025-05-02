@@ -88,7 +88,7 @@ class TokenSDK:
             if self._blacklist:
                 self._logger.info("客户端模式使用黑名单检查撤销令牌")
 
-    def create_token(self, user_id: str, username: str, roles: List[str], device_id: str = None) -> str:
+    def _create_token(self, user_id: str, username: str, roles: List[str], device_id: str = None) -> str:
         """创建访问令牌
         
         使用实例配置创建访问令牌，适用于需要一致配置的场景。
@@ -243,7 +243,7 @@ class TokenSDK:
                 self._logger.debug(f"从Authorization头部提取访问令牌失败: {str(e)}")
             return None
     
-    def set_token_to_response(self, response, token: str, token_type: str = "access", max_age: int = None) -> None:
+    def set_token_to_response(self, response, token: str, token_type: str = "access", max_age: int = None, path: str = None) -> None:
         """将令牌设置到响应中
         
         访问令牌设置到Authorization头，刷新令牌设置到HTTP-only cookie
@@ -253,12 +253,13 @@ class TokenSDK:
             token: 要设置的令牌
             token_type: 令牌类型，"access"或"refresh"
             max_age: Cookie最大生存期(秒)，仅用于刷新令牌
+            path: Cookie路径，仅用于刷新令牌
         """
         try:
             if token is None:
                 # 删除cookie或头部
                 if token_type == "refresh" and hasattr(response, "delete_cookie"):
-                    response.delete_cookie("refresh_token")
+                    response.delete_cookie("refresh_token", path=path or "/api/auth")
                     self._logger.debug("删除刷新令牌Cookie成功")
             else:
                 if token_type == "access":
@@ -273,15 +274,19 @@ class TokenSDK:
                         from .token_schemas import REFRESH_TOKEN_EXPIRE_DAYS
                         refresh_max_age = max_age or REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
                         
+                        # 设置刷新令牌的路径为认证API路径
+                        refresh_path = path or "/api/auth"
+                        
                         response.set_cookie(
                             key="refresh_token",
                             value=token,
                             httponly=True,
                             secure=True,  # 生产环境保持True
                             samesite="Lax",
-                            max_age=refresh_max_age
+                            max_age=refresh_max_age,
+                            path=refresh_path  # 限制刷新令牌的路径
                         )
-                        self._logger.debug("设置刷新令牌Cookie成功")
+                        self._logger.debug(f"设置刷新令牌Cookie成功，路径限制为: {refresh_path}")
         except Exception as e:
             self._logger.error(f"设置{token_type}令牌到响应失败: {str(e)}")
     
@@ -302,7 +307,7 @@ class TokenSDK:
         """
         try:
             # 创建令牌
-            token = self.create_token(user_id, username, roles, device_id)
+            token = self._create_token(user_id, username, roles, device_id)
             
             # 设置令牌到响应
             self.set_token_to_response(response, token)
@@ -359,11 +364,16 @@ class TokenSDK:
                             self._logger.warning(f"自动续订刷新令牌失败: {extend_result.error}")
                     
                     # 创建新的访问令牌
-                    access_token = self.create_token(user_id, username, roles, device_id)
+                    access_token = self._create_token(user_id, username, roles, device_id)
                     
                     # 将访问令牌设置到header
                     self.set_token_to_response(response, access_token, "access")
                     
+                    # 获取刷新令牌并设置到Cookie
+                    refresh_token_claims = refresh_data
+                    refresh_token = refresh_token_claims.jwt_encode()
+                    self.set_token_to_response(response, refresh_token, "refresh")
+
                     # 返回成功结果
                     return Result.ok(
                         data={
@@ -444,6 +454,11 @@ class TokenSDK:
                         # 将访问令牌设置到header
                         self.set_token_to_response(response, new_token, "access")
                             
+                        # 获取刷新令牌并设置到Cookie
+                        refresh_token_claims = refresh_result.data
+                        refresh_token = refresh_token_claims.jwt_encode()
+                        self.set_token_to_response(response, refresh_token, "refresh")
+                        
                         return Result.ok(data=new_token_data, message="访问令牌已刷新")
                 
                 # 记录刷新失败
@@ -595,19 +610,18 @@ class TokenSDK:
                     
                     # 如果剩余有效期低于总有效期的25%，自动续订
                     if remaining_lifetime > 0 and remaining_lifetime < (total_lifetime * 0.25):
-                        logger.debug(f"令牌接近过期，自动续订: {token_claims.get('username')}")
-                        
-                        # 创建新的访问令牌
-                        new_token = self.create_token(
+                        # 使用TokensManager的renew_access_token方法
+                        renew_result = self._tokens_manager.renew_access_token(
                             user_id=token_claims.get('user_id'),
                             username=token_claims.get('username'),
                             roles=token_claims.get('roles'),
                             device_id=token_claims.get('device_id')
                         )
                         
-                        # 设置新令牌到响应
-                        self.set_token_to_response(response, new_token)
-                        logger.info(f"访问令牌已自动续订: {token_claims.get('username')}")
+                        if renew_result.is_ok() and "access_token" in renew_result.data:
+                            # 设置新令牌到响应
+                            self.set_token_to_response(response, renew_result.data["access_token"])
+                            logger.info(f"访问令牌已自动续订: {token_claims.get('username')}")
                 except Exception as e:
                     # 续订失败不影响当前请求，仅记录日志
                     logger.warning(f"自动续订令牌失败: {str(e)}")
@@ -654,3 +668,79 @@ class TokenSDK:
         
         token_id = f"{user_id}:{device_id}"
         return self._blacklist.contains(token_id)
+
+    def _update_refresh_token(self, user_id: str, username: str, roles: List[str], device_id: str) -> Result[bool]:
+        """更新或创建刷新令牌
+        
+        在用户登录时调用，创建或更新设备的刷新令牌
+        仅在认证服务器模式下可用
+        
+        Args:
+            user_id: 用户ID
+            username: 用户名
+            roles: 用户角色列表
+            device_id: 设备ID
+            
+        Returns:
+            Result: 操作结果
+        """
+        if not self._auth_server or not self._tokens_manager:
+            return Result.fail("只有认证服务器模式支持刷新令牌管理")
+        
+        try:
+            token_claims = self._tokens_manager.update_refresh_token(
+                user_id=user_id,
+                username=username,
+                roles=roles,
+                device_id=device_id
+            )
+            self._logger.debug(f"更新设备刷新令牌成功: {device_id}")
+            return Result.ok(data=token_claims, message="刷新令牌更新成功")
+        except Exception as e:
+            error_msg = f"更新刷新令牌失败: {str(e)}"
+            self._logger.error(error_msg)
+            return Result.fail(error_msg)
+
+    def create_session(self, response, user_id: str, username: str, roles: List[str], device_id: str, path: str = None) -> Result:
+        """创建完整的用户会话（刷新令牌 + 访问令牌）
+        
+        在用户登录时调用，同时处理刷新令牌和访问令牌的创建和设置
+        
+        Args:
+            response: HTTP响应对象
+            user_id: 用户ID
+            username: 用户名
+            roles: 用户角色列表
+            device_id: 设备ID
+            path: 路径，仅用于刷新令牌
+            
+        Returns:
+            Result: 包含创建的令牌信息的结果
+        """
+        try:
+            # 1. 更新刷新令牌
+            refresh_result = self._update_refresh_token(user_id, username, roles, device_id)
+            if refresh_result.is_fail():
+                return refresh_result
+            
+            # 2. 创建访问令牌
+            access_token = self._create_token(user_id, username, roles, device_id)
+            
+            # 3. 设置访问令牌到响应
+            self.set_token_to_response(response, access_token, "access", path=path)
+            
+            # 获取刷新令牌并设置到Cookie
+            refresh_token_claims = refresh_result.data
+            refresh_token = refresh_token_claims.jwt_encode()
+            self.set_token_to_response(response, refresh_token, "refresh", path=path)
+            
+            return Result.ok(
+                data={
+                    "access_token": access_token,
+                    "user_id": user_id,
+                    "username": username
+                }, 
+                message="用户会话创建成功"
+            )
+        except Exception as e:
+            return Result.fail(f"创建用户会话失败: {str(e)}")

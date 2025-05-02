@@ -89,7 +89,6 @@ def create_auth_endpoints(
         """
         username: str = Field(..., description="用户名")
         password: str = Field(..., description="密码")
-        device_id: Optional[str] = Field(None, description="设备ID")
 
     @handle_errors()
     async def login(request: Request, response: Response, login_data: LoginRequest):
@@ -122,24 +121,16 @@ def create_auth_endpoints(
             )
             
         # 获取或创建设备ID
-        device_id = login_data.device_id or _create_browser_device_id(request)
-
-        # 更新设备刷新令牌
-        token_sdk._tokens_manager.update_refresh_token(
-            user_id=user_info['user_id'],
-            username=user_info['username'],
-            roles=user_info['roles'],
-            device_id=device_id
-        )
-        logger.debug(f"更新设备刷新令牌: {device_id}")
+        device_id = _create_browser_device_id(request)
 
         # 创建设备访问令牌并设置到响应
-        result = token_sdk.create_and_set_token(
+        result = token_sdk.create_session(
             response=response,
             user_id=user_info['user_id'],
             username=user_info['username'],
             roles=user_info['roles'],
-            device_id=device_id
+            device_id=device_id,
+            path=f"{prefix}/auth"
         )
 
         if result.is_fail():
@@ -163,12 +154,6 @@ def create_auth_endpoints(
         """退出在设备上的登录"""
         logger.debug(f"要注销的用户信息: {token_claims}")
 
-        # 撤销当前设备的刷新令牌
-        token_sdk._tokens_manager.revoke_refresh_token(
-            user_id=token_claims['user_id'],
-            device_id=token_claims['device_id']
-        )
-        
         # 撤销当前设备的访问令牌 - 加入黑名单
         token_sdk.revoke_token(
             user_id=token_claims['user_id'],
@@ -176,7 +161,7 @@ def create_auth_endpoints(
         )
         
         # 删除当前设备的cookie
-        token_sdk.set_token_to_response(response, None)
+        token_sdk.set_token_to_response(response, None, path=f"{prefix}/auth")
 
         return {"message": "注销成功"}
 
@@ -300,51 +285,12 @@ def create_auth_endpoints(
     @handle_errors()
     async def refresh_token(
         request: Request, 
-        response: Response,
-        token_request: TokenRequest = None
+        response: Response
     ):
         """刷新过期的访问令牌"""
         # 记录请求信息，帮助诊断问题
         logger.debug(f"收到令牌刷新请求, Cookie: {request.cookies}, Headers: {request.headers}")
-        
-        # 增强从请求中提取令牌的方法
-        token = None
-        
-        # 1. 从TokenSDK的标准方法中尝试提取
-        token = token_sdk.extract_token_from_request(request)
-        
-        # 2. 如果上面的方法失败，从请求体中尝试提取
-        if not token and token_request and token_request.token:
-            token = token_request.token
-            logger.debug(f"从请求体中提取到令牌: {token[:10]}...")
-        
-        # 3. 从请求体的JSON数据中提取（适用于远程模式的刷新请求）
-        if not token:
-            try:
-                body = await request.json()
-                if isinstance(body, dict) and "token" in body:
-                    token = body["token"]
-                    logger.debug(f"从请求体JSON中提取到令牌: {token[:10]}...")
-            except Exception as e:
-                logger.debug(f"从请求体JSON中提取令牌失败: {str(e)}")
-        
-        # 4. 尝试从Authorization头部提取
-        if not token and "Authorization" in request.headers:
-            auth_header = request.headers.get("Authorization")
-            if auth_header and auth_header.startswith("Bearer "):
-                token = auth_header.split(" ")[1]
-                logger.debug(f"从Authorization头部提取到令牌: {token[:10]}...")
-        
-        # 最终检查是否获取到令牌
-        if not token:
-            logger.error("刷新令牌失败: 未能从请求中提取到令牌")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="令牌不存在"
-            )
-        
-        logger.debug(f"成功从请求中提取到令牌: {token[:10]}...")
-        
+
         # 使用TokenSDK的方法处理令牌刷新
         result = token_sdk.handle_token_refresh(request, response)
         
@@ -355,10 +301,6 @@ def create_auth_endpoints(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=result.error
             )
-        
-        # 不再依赖token_storage_method
-        if "access_token" in result.data:
-            token_sdk.set_token_to_response(response, result.data["access_token"])
         
         # 简化响应逻辑
         if request.headers.get("accept", "").find("application/json") >= 0:

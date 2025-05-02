@@ -674,16 +674,16 @@ class TestTokenRefreshFlow:
             })
             
             # 模拟创建新令牌
-            with patch.object(token_sdk, 'create_token') as mock_create_token:
-                mock_create_token.return_value = "new_renewed_token"
+            with patch.object(token_sdk._tokens_manager, 'renew_access_token') as mock_renew:
+                mock_renew.return_value = Result.ok(data={"access_token": "new_renewed_token"})
                 
                 # 发送请求到需要认证的端点
                 response = authenticated_client.get("/api/auth/profile")
                 
                 # 验证请求成功且创建了新令牌
                 assert response.status_code == 200
-                mock_create_token.assert_called_once()
-                assert mock_create_token.call_args[1]["user_id"] == user_id
+                mock_renew.assert_called_once()
+                assert mock_renew.call_args[1]["user_id"] == user_id
                 
                 # 验证响应头包含新令牌
                 assert "Authorization" in response.headers
@@ -715,13 +715,15 @@ class TestTokenRefreshFlow:
             })
             
             # 模拟create_token方法
-            with patch.object(token_sdk, 'create_token') as mock_create_token:
+            with patch.object(token_sdk._tokens_manager, 'renew_access_token') as mock_renew:
+                mock_renew.return_value = Result.ok(data={"access_token": "new_renewed_token"})
+                
                 # 发送请求到需要认证的端点
                 response = authenticated_client.get("/api/auth/profile")
                 
                 # 验证请求成功且没有触发令牌续订
                 assert response.status_code == 200
-                mock_create_token.assert_not_called()
+                mock_renew.assert_not_called()
 
 
 class TestRequireUserDecorator:
