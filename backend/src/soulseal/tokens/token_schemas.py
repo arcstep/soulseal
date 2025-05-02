@@ -83,6 +83,32 @@ class TokenClaims(BaseModel):
             exp=exp
         )
 
+    @classmethod
+    def jwt_encode_payload(cls, payload: Dict[str, Any]) -> str:
+        """编码任意JWT负载"""
+        return jwt.encode(
+            payload=payload,
+            key=JWT_SECRET_KEY,
+            algorithm=JWT_ALGORITHM
+        )
+
+    @classmethod
+    def jwt_decode(cls, token: str, verify_exp: bool = True, verify_signature: bool = True) -> Dict[str, Any]:
+        """解码JWT令牌"""
+        # 自动处理字符串/字节转换
+        if isinstance(token, str):
+            token = token.encode('utf-8')
+        
+        return jwt.decode(
+            token,
+            key=JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+            options={
+                'verify_exp': verify_exp,
+                'verify_signature': verify_signature
+            }
+        )
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         from_attributes=True
@@ -109,11 +135,7 @@ class TokenClaims(BaseModel):
 
     def jwt_encode(self) -> str:
         """将令牌信息转换为JWT令牌"""
-        return jwt.encode(
-            payload=self.model_dump(),
-            key=JWT_SECRET_KEY,
-            algorithm=JWT_ALGORITHM
-        )
+        return self.jwt_encode_payload(self.model_dump())
 
     def is_expired(self, current_time: Optional[float] = None) -> bool:
         """检查令牌是否已过期"""

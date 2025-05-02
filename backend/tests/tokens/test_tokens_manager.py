@@ -363,7 +363,7 @@ class TestTokensManager:
         
         # 验证结果
         assert result.is_fail()
-        assert "已经撤销" in result.error
+        assert "已被撤销" in result.error
 
     def test_extend_refresh_token_max_lifetime(self, tokens_manager, user_data):
         """测试刷新令牌最大绝对有效期限制"""
@@ -378,11 +378,12 @@ class TestTokensManager:
             # 获取令牌并修改它的过期时间和首次发行时间
             token_key = TokenClaims.get_refresh_token_key(user_data["user_id"], user_data["device_id"])
             token_claims = tokens_manager._cache.get(token_key)
+            token_claims = TokenClaims(**token_claims)
             
             # 修改令牌有效期为一年后，这样不会因过期而失败
             token_claims.exp = initial_timestamp + (365 * 86400)  # 设置过期时间为一年后
             token_claims.first_issued_at = initial_timestamp
-            tokens_manager._cache.put(token_key, token_claims)
+            tokens_manager._cache.put(token_key, token_claims.model_dump())
             
             # 模拟时间流逝到181天后（超过最大有效期但未超过令牌过期时间）
             mock_time.return_value = initial_timestamp + (181 * 86400)

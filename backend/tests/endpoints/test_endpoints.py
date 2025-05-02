@@ -13,7 +13,7 @@ import json
 
 from voidring import IndexedRocksDB
 from soulseal.tokens import TokenBlacklistProvider, TokenSDK
-from soulseal.tokens.token_schemas import TokenClaims, TokenType, JWT_SECRET_KEY, JWT_ALGORITHM
+from soulseal.tokens.token_schemas import TokenClaims, TokenType, JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 from soulseal.users import UsersManager, User, UserRole
 from soulseal.endpoints import create_auth_endpoints, HttpMethod, handle_errors
 from soulseal.schemas import Result
@@ -657,7 +657,7 @@ class TestTokenRefreshFlow:
         
         # 计算模拟的时间戳，使令牌剩余有效期正好为总有效期的20%（低于25%阈值）
         current_time = datetime.utcnow().timestamp()
-        total_lifetime = 60 * token_sdk._access_token_expire_minutes
+        total_lifetime = 60 * ACCESS_TOKEN_EXPIRE_MINUTES
         iat_time = current_time - (0.8 * total_lifetime)
         exp_time = iat_time + total_lifetime
         
@@ -701,7 +701,7 @@ class TestTokenRefreshFlow:
         
         # 计算模拟的时间戳，令牌剩余有效期为总有效期的80%（远高于25%阈值）
         current_time = datetime.utcnow().timestamp()
-        total_lifetime = 60 * token_sdk._access_token_expire_minutes
+        total_lifetime = 60 * ACCESS_TOKEN_EXPIRE_MINUTES
         iat_time = current_time - (0.2 * total_lifetime)
         exp_time = iat_time + total_lifetime
         

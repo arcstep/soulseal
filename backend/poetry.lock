@@ -1474,14 +1474,16 @@ description = "Inspired by the infinite void of mystical storage rings, VoidRing
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
-files = [
-    {file = "voidring-0.1.3-py3-none-any.whl", hash = "sha256:9d52f206a9a211d205c28385242bd248c84845cb88bd1eb53173de014526ff62"},
-    {file = "voidring-0.1.3.tar.gz", hash = "sha256:186c7de8d7d6ecf96bfaddbb256db675a1c72527ba13761a557de5697f5e3bfe"},
-]
+files = []
+develop = true
 
 [package.dependencies]
 pydantic = ">=2.11.2,<3.0.0"
 rocksdict = ">=0.3.25,<0.4.0"
+
+[package.source]
+type = "directory"
+url = "../../voidring"
 
 [[package]]
 name = "yarl"
@@ -1588,4 +1590,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11"
-content-hash = "b9a787e03534bd81854d15376f2f365c74466fcd89a2995092492fd4a571c74f"
+content-hash = "e49282c4420917edc074fd8c4f3229780220d339675a9a7c7fee8b01798c0486"

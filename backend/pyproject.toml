@@ -21,7 +21,7 @@ requests = ">=2.32.3,<3.0.0"
 aiohttp = ">=3.11.16,<4.0.0"
 responses = ">=0.25.7,<0.26.0"
 async-timeout = ">=5.0.1,<6.0.0"
-voidring = ">=0.1.3, <0.2.0"
+voidring = {path = "../../voidring", develop = true}
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"

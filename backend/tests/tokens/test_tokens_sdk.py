@@ -72,11 +72,10 @@ class TestAuthServerSDK:
             device_id=user_data["device_id"]
         )
         
-        # 解码验证令牌数据
-        decoded = jwt.decode(
+        # 使用TokenClaims解码令牌
+        decoded = TokenClaims.jwt_decode(
             token,
-            key=auth_server_sdk._jwt_secret_key,
-            algorithms=[auth_server_sdk._jwt_algorithm]
+            verify_exp=True
         )
         
         assert decoded["user_id"] == user_data["user_id"]
@@ -139,15 +138,17 @@ class TestAuthServerSDK:
     def test_handle_token_refresh_with_refresh_token(self, auth_server_sdk, user_data):
         """测试使用刷新令牌刷新访问令牌"""
         # 创建刷新令牌
-        refresh_claims = auth_server_sdk._update_refresh_token(
+        refresh_result = auth_server_sdk._update_refresh_token(
             user_id=user_data["user_id"],
             username=user_data["username"],
             roles=user_data["roles"],
             device_id=user_data["device_id"]
         )
+        refresh_claims_dict = refresh_result.data  # 从Result对象中获取字典数据
+        
         # 创建请求和响应模拟
         mock_request = MagicMock()
-        refresh_token = refresh_claims.data.jwt_encode()
+        refresh_token = TokenClaims.jwt_encode_payload(refresh_claims_dict)
         mock_request.cookies = {"refresh_token": refresh_token}
         mock_response = MagicMock()
 
@@ -327,8 +328,7 @@ class TestAuthServerSDK:
             httponly=True,
             secure=True,
             samesite="Lax",
-            max_age=mock.ANY,
-            path='/api/auth'
+            max_age=mock.ANY
         )
 
     def test_missing_token(self, auth_server_sdk):
@@ -355,6 +355,57 @@ class TestAuthServerSDK:
         assert result.is_ok()
         assert result.data["user_id"] == user_data["user_id"]
 
+    def test_refresh_token_full_lifecycle(self, auth_server_sdk, user_data, db):
+        """测试刷新令牌的完整生命周期，使用真实数据库操作"""
+        user_id = user_data["user_id"]
+        device_id = user_data["device_id"]
+        
+        # 1. 创建刷新令牌
+        refresh_result = auth_server_sdk._update_refresh_token(**user_data)
+        assert refresh_result.is_ok()
+        
+        # 2. 验证刷新令牌确实存储在数据库中
+        refresh_token_data = auth_server_sdk._tokens_manager.get_refresh_token_data(user_id, device_id)
+        assert refresh_token_data is not None
+        assert refresh_token_data["user_id"] == user_id
+        
+        # 3. 测试延长刷新令牌有效期
+        original_expires = refresh_token_data["exp"]
+        extend_result = auth_server_sdk.extend_refresh_token(user_id, device_id)
+        assert extend_result.is_ok()
+        
+        # 再次读取验证过期时间已更新
+        updated_data = auth_server_sdk._tokens_manager.get_refresh_token_data(user_id, device_id)
+        assert updated_data["exp"] > original_expires
+        
+        # 4. 测试使用刷新令牌获取新的访问令牌
+        mock_request = MagicMock()
+        mock_response = MagicMock()
+        
+        # 从数据库获取刷新令牌字符串
+        refresh_token_jwt = auth_server_sdk._tokens_manager.get_refresh_token(user_id, device_id)
+        
+        # 设置mock_request的cookies.get方法返回值
+        mock_request.cookies = MagicMock()
+        mock_request.cookies.get = MagicMock(return_value=refresh_token_jwt)
+        
+        # 调用handle_token_refresh方法
+        refresh_result = auth_server_sdk.handle_token_refresh(mock_request, mock_response)
+        assert refresh_result.is_ok()
+        assert "access_token" in refresh_result.data
+        
+        # 5. 测试撤销令牌
+        revoke_result = auth_server_sdk.revoke_token(user_id, device_id)
+        assert revoke_result is True
+        
+        # 验证刷新令牌已从数据库删除或过期
+        revoked_data = auth_server_sdk._tokens_manager.get_refresh_token_data(user_id, device_id)
+        if revoked_data is not None:
+            assert revoked_data["exp"] <= revoked_data["iat"]  # 令牌已过期
+        
+        # 验证设备ID在黑名单中
+        assert auth_server_sdk.is_blacklisted(user_id, device_id)
+
 class TestClientSDK:
     """测试客户端模式下的TokenSDK"""
     
@@ -367,12 +418,8 @@ class TestClientSDK:
             device_id=user_data["device_id"]
         )
         
-        # 解码验证令牌数据
-        decoded = jwt.decode(
-            token,
-            key=client_sdk._jwt_secret_key,
-            algorithms=[client_sdk._jwt_algorithm]
-        )
+        # 使用TokenClaims解码令牌
+        decoded = TokenClaims.jwt_decode(token)
         
         assert decoded["user_id"] == user_data["user_id"]
         assert decoded["token_type"] == TokenType.ACCESS

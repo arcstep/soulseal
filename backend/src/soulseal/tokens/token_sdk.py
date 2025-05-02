@@ -11,8 +11,7 @@ import jwt
 from ..users import UserRole
 from ..schemas import Result
 from .token_schemas import (
-    TokenType, TokenClaims, TokenResult,
-    JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
+    TokenType, TokenClaims, TokenResult
 )
 from .blacklist import TokenBlacklistProvider, MemoryTokenBlacklist
 from .tokens_manager import TokensManager
@@ -57,9 +56,6 @@ class TokenSDK:
             blacklist_provider: 黑名单提供者，两种模式都可以使用
         """
         self._logger = logging.getLogger(__name__)
-        self._jwt_secret_key = jwt_secret_key or JWT_SECRET_KEY
-        self._jwt_algorithm = JWT_ALGORITHM
-        self._access_token_expire_minutes = ACCESS_TOKEN_EXPIRE_MINUTES
         
         # 设置工作模式
         self._auth_server = auth_server
@@ -89,20 +85,7 @@ class TokenSDK:
                 self._logger.info("客户端模式使用黑名单检查撤销令牌")
 
     def _create_token(self, user_id: str, username: str, roles: List[str], device_id: str = None) -> str:
-        """创建访问令牌
-        
-        使用实例配置创建访问令牌，适用于需要一致配置的场景。
-        在所有模式下都可用。
-        
-        Args:
-            user_id: 用户ID
-            username: 用户名
-            roles: 用户角色列表
-            device_id: 设备ID，如果不提供则自动生成
-            
-        Returns:
-            str: JWT格式的访问令牌
-        """
+        """创建访问令牌"""
         # 使用共享TokenClaims创建访问令牌
         claims = TokenClaims.create_access_token(
             user_id=user_id,
@@ -111,22 +94,14 @@ class TokenSDK:
             device_id=device_id
         )
         
-        # 编码为JWT
-        return jwt.encode(
-            payload=claims.model_dump(),
-            key=self._jwt_secret_key,
-            algorithm=self._jwt_algorithm
-        )
+        # 使用TokenClaims的JWT编码方法
+        return claims.jwt_encode()
 
     def verify_token(self, token: str, required_roles: List[str] = None) -> Result[Dict[str, Any]]:
         """验证JWT访问令牌"""
         try:
             # 先解码令牌但不验证过期时间
-            unverified = jwt.decode(
-                token, key=self._jwt_secret_key, 
-                algorithms=[self._jwt_algorithm],
-                options={'verify_exp': False}
-            )
+            unverified = TokenClaims.jwt_decode(token, verify_exp=False)
             
             # 如果提供了黑名单，检查令牌是否已撤销
             if self._blacklist:
@@ -137,12 +112,7 @@ class TokenSDK:
             
             # 验证签名和过期时间
             try:
-                payload = jwt.decode(
-                    token,
-                    key=self._jwt_secret_key,
-                    algorithms=[self._jwt_algorithm],
-                    options={"verify_exp": True}
-                )
+                payload = TokenClaims.jwt_decode(token, verify_exp=True)
                 
                 # 验证角色要求
                 if required_roles and not self.verify_roles(required_roles, payload.get('roles', [])):
@@ -259,7 +229,7 @@ class TokenSDK:
             if token is None:
                 # 删除cookie或头部
                 if token_type == "refresh" and hasattr(response, "delete_cookie"):
-                    response.delete_cookie("refresh_token", path=path or "/api/auth")
+                    response.delete_cookie("refresh_token")
                     self._logger.debug("删除刷新令牌Cookie成功")
             else:
                 if token_type == "access":
@@ -274,19 +244,15 @@ class TokenSDK:
                         from .token_schemas import REFRESH_TOKEN_EXPIRE_DAYS
                         refresh_max_age = max_age or REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
                         
-                        # 设置刷新令牌的路径为认证API路径
-                        refresh_path = path or "/api/auth"
-                        
                         response.set_cookie(
                             key="refresh_token",
                             value=token,
                             httponly=True,
                             secure=True,  # 生产环境保持True
                             samesite="Lax",
-                            max_age=refresh_max_age,
-                            path=refresh_path  # 限制刷新令牌的路径
+                            max_age=refresh_max_age
                         )
-                        self._logger.debug(f"设置刷新令牌Cookie成功，路径限制为: {refresh_path}")
+                        self._logger.debug(f"设置刷新令牌Cookie成功")
         except Exception as e:
             self._logger.error(f"设置{token_type}令牌到响应失败: {str(e)}")
     
@@ -331,12 +297,8 @@ class TokenSDK:
         # 如果找到了刷新令牌，直接使用它
         if refresh_token:
             try:
-                # 解析刷新令牌但不验证过期时间
-                refresh_data = jwt.decode(
-                    refresh_token, key=self._jwt_secret_key, 
-                    algorithms=[self._jwt_algorithm],
-                    options={'verify_exp': False}
-                )
+                # 使用TokenClaims的解码方法
+                refresh_data = TokenClaims.jwt_decode(refresh_token, verify_exp=False)
                 
                 user_id = refresh_data.get("user_id")
                 device_id = refresh_data.get("device_id")
@@ -348,12 +310,7 @@ class TokenSDK:
                 
                 # 验证刷新令牌是否过期
                 try:
-                    jwt.decode(
-                        refresh_token,
-                        key=self._jwt_secret_key,
-                        algorithms=[self._jwt_algorithm],
-                        options={"verify_exp": True}
-                    )
+                    TokenClaims.jwt_decode(refresh_token, verify_exp=True)
                     
                     # 刷新令牌有效，延长其有效期
                     if self._auth_server and self._tokens_manager:
@@ -370,8 +327,7 @@ class TokenSDK:
                     self.set_token_to_response(response, access_token, "access")
                     
                     # 获取刷新令牌并设置到Cookie
-                    refresh_token_claims = refresh_data
-                    refresh_token = refresh_token_claims.jwt_encode()
+                    refresh_token = TokenClaims.jwt_encode_payload(refresh_data)
                     self.set_token_to_response(response, refresh_token, "refresh")
 
                     # 返回成功结果
@@ -401,9 +357,10 @@ class TokenSDK:
         
         try:
             # 解析访问令牌但不验证过期时间
-            unverified = jwt.decode(
-                access_token, key=None, 
-                options={'verify_signature': False, 'verify_exp': False}
+            unverified = TokenClaims.jwt_decode(
+                access_token,
+                verify_exp=False,
+                verify_signature=False
             )
             
             user_id = unverified.get("user_id")
@@ -416,11 +373,9 @@ class TokenSDK:
             
             # 验证令牌是否已过期
             try:
-                jwt.decode(
+                TokenClaims.jwt_decode(
                     access_token,
-                    key=self._jwt_secret_key,
-                    algorithms=[self._jwt_algorithm],
-                    options={"verify_exp": True}
+                    verify_exp=True
                 )
                 # 令牌未过期，不需要刷新
                 return Result.ok(
@@ -456,7 +411,7 @@ class TokenSDK:
                             
                         # 获取刷新令牌并设置到Cookie
                         refresh_token_claims = refresh_result.data
-                        refresh_token = refresh_token_claims.jwt_encode()
+                        refresh_token = TokenClaims.jwt_encode_payload(refresh_token_claims)
                         self.set_token_to_response(response, refresh_token, "refresh")
                         
                         return Result.ok(data=new_token_data, message="访问令牌已刷新")
@@ -688,14 +643,14 @@ class TokenSDK:
             return Result.fail("只有认证服务器模式支持刷新令牌管理")
         
         try:
-            token_claims = self._tokens_manager.update_refresh_token(
+            token_claims_dict = self._tokens_manager.update_refresh_token(
                 user_id=user_id,
                 username=username,
                 roles=roles,
                 device_id=device_id
             )
             self._logger.debug(f"更新设备刷新令牌成功: {device_id}")
-            return Result.ok(data=token_claims, message="刷新令牌更新成功")
+            return Result.ok(data=token_claims_dict, message="刷新令牌更新成功")
         except Exception as e:
             error_msg = f"更新刷新令牌失败: {str(e)}"
             self._logger.error(error_msg)
@@ -731,7 +686,7 @@ class TokenSDK:
             
             # 获取刷新令牌并设置到Cookie
             refresh_token_claims = refresh_result.data
-            refresh_token = refresh_token_claims.jwt_encode()
+            refresh_token = TokenClaims.jwt_encode_payload(refresh_token_claims)
             self.set_token_to_response(response, refresh_token, "refresh", path=path)
             
             return Result.ok(

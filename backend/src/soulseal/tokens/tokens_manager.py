@@ -21,11 +21,6 @@ from .token_schemas import (
 )
 from .blacklist import TokenBlacklistProvider, MemoryTokenBlacklist, RedisTokenBlacklist
 
-__JWT_SECRET_KEY__ = os.getenv("FASTAPI_SECRET_KEY", "MY-SECRET-KEY")
-__JWT_ALGORITHM__ = os.getenv("FASTAPI_ALGORITHM", "HS256")
-__ACCESS_TOKEN_EXPIRE_MINUTES__ = int(os.getenv("FASTAPI_ACCESS_TOKEN_EXPIRE_MINUTES", 5))
-__REFRESH_TOKEN_EXPIRE_DAYS__ = int(os.getenv("FASTAPI_REFRESH_TOKEN_EXPIRE_DAYS", 30))
-
 class TokenType(str, Enum):
     """令牌类型"""
     ACCESS = "access"
@@ -47,59 +42,47 @@ class TokensManager:
             blacklist_provider: 黑名单提供者，默认为MemoryTokenBlacklist
         """
         self._logger = logging.getLogger(__name__)
-        self._cache = CachedRocksDB(db)
+        self._cache = db
         self._token_blacklist = blacklist_provider or MemoryTokenBlacklist()
         
     def get_refresh_token(self, user_id: str, device_id: str) -> str:
         """获取刷新令牌
         
-        从数据库中获取用户特定设备的刷新令牌。
-        
-        Args:
-            user_id: 用户ID
-            device_id: 设备ID
-            
-        Returns:
-            str: JWT格式的刷新令牌，如果不存在则返回None
+        从数据库中获取用户特定设备的刷新令牌并转换为JWT
         """
         token_key = TokenClaims.get_refresh_token_key(user_id, device_id)
-        token_claims = self._cache.get(token_key)
-        if token_claims:
+        token_data = self._cache.get(token_key)
+        
+        if token_data:
+            # 处理字典格式
+            token_claims = TokenClaims(**token_data)
             return token_claims.jwt_encode()
         return None
     
-    def update_refresh_token(self, user_id: str, username: str, roles: List[str], device_id: str) -> TokenClaims:
-        """保存刷新令牌到数据库
-        
-        创建新的刷新令牌并保存到数据库中。
-        通常在用户登录时调用。
-        
-        Args:
-            user_id: 用户ID
-            username: 用户名
-            roles: 用户角色列表
-            device_id: 设备ID
-            
-        Returns:
-            TokenClaims: 创建的刷新令牌对象
-        """
+    def update_refresh_token(self, user_id: str, username: str, roles: List[str], device_id: str) -> Dict[str, Any]:
+        """保存刷新令牌到数据库"""
         # 创建刷新令牌
         claims = TokenClaims.create_refresh_token(user_id, username, roles, device_id)
+        
+        # 转换为字典
+        claims_dict = claims.model_dump()
 
-        # 保存刷新令牌到数据库
+        # 保存到数据库
         token_key = TokenClaims.get_refresh_token_key(user_id, device_id)
-        self._cache.put(token_key, claims)
+        self._cache.put(token_key, claims_dict)
 
         self._logger.info(f"已更新刷新令牌: {claims}")
-        return claims
+        return claims_dict  # 返回字典而不是TokenClaims对象
     
     def revoke_refresh_token(self, user_id: str, device_id: str) -> None:
         """撤销数据库中的刷新令牌"""
         token_key = TokenClaims.get_refresh_token_key(user_id, device_id)
-        claims = self._cache.get(token_key)
-        if claims:
-            claims.revoke()
-            self._cache.put(token_key, claims)
+        token_data = self._cache.get(token_key)
+        
+        if token_data:
+            # 直接修改字典过期时间
+            token_data["exp"] = token_data.get("iat", get_current_timestamp())
+            self._cache.put(token_key, token_data)
             self._logger.info(f"刷新令牌已撤销: {token_key}")
     
     def refresh_access_token(self, user_id: str, username: str, roles: List[str], device_id: str) -> Result[Dict[str, Any]]:
@@ -118,11 +101,7 @@ class TokensManager:
         
         try:
             # 验证刷新令牌
-            refresh_data = jwt.decode(
-                refresh_token,
-                key=JWT_SECRET_KEY,
-                algorithms=[JWT_ALGORITHM]
-            )
+            refresh_data = TokenClaims.jwt_decode(refresh_token)
             
             # 检查令牌类型
             if refresh_data.get("token_type") != TokenType.REFRESH:
@@ -142,12 +121,7 @@ class TokensManager:
             return Result.ok(
                 data={
                     "access_token": access_token,
-                    **jwt.decode(
-                        access_token,
-                        key=JWT_SECRET_KEY,
-                        algorithms=[JWT_ALGORITHM],
-                        options={'verify_exp': False}
-                    )
+                    **TokenClaims.jwt_decode(access_token, verify_exp=False)
                 },
                 message="访问令牌刷新成功"
             )
@@ -190,12 +164,7 @@ class TokensManager:
             return Result.ok(
                 data={
                     "access_token": access_token,
-                    **jwt.decode(
-                        access_token,
-                        key=JWT_SECRET_KEY,
-                        algorithms=[JWT_ALGORITHM],
-                        options={'verify_exp': False}
-                    )
+                    **TokenClaims.jwt_decode(access_token, verify_exp=False)
                 },
                 message="访问令牌续订成功"
             )
@@ -224,42 +193,50 @@ class TokensManager:
 
     def extend_refresh_token(self, user_id: str, device_id: str, max_absolute_lifetime_days: int = 180) -> Result[bool]:
         """延长刷新令牌有效期（滑动过期机制）"""
-        # 先检查黑名单
-        token_id = f"{user_id}:{device_id}"
-        if hasattr(self, '_token_blacklist') and self._token_blacklist.contains(token_id):
-            self._logger.warning(f"访问令牌已经撤销: {token_id}")
-            return Result.fail("访问令牌已经撤销")
-
         token_key = TokenClaims.get_refresh_token_key(user_id, device_id)
-        token_claims = self._cache.get(token_key)
+        token_data = self._cache.get(token_key)
         
-        if not token_claims:
-            self._logger.warning(f"刷新令牌不存在: {user_id}:{device_id}")
+        if not token_data:
             return Result.fail("刷新令牌不存在")
         
-        # 获取当前时间
+        token_id = f"{user_id}:{device_id}"
+        if hasattr(self, '_token_blacklist') and self._token_blacklist.contains(token_id):
+            self._logger.warning(f"刷新令牌已被撤销: {token_id}")
+            return Result.fail("刷新令牌已被撤销")
+        
         now = get_current_timestamp()
         
         # 获取或设置首次颁发时间
-        if not hasattr(token_claims, "first_issued_at") or token_claims.first_issued_at is None:
-            token_claims.first_issued_at = token_claims.iat
+        if "first_issued_at" not in token_data or token_data["first_issued_at"] is None:
+            token_data["first_issued_at"] = token_data.get("iat")
         
-        # 1. 先检查最大绝对有效期 - 调整顺序
-        max_absolute_expiry = token_claims.first_issued_at + (max_absolute_lifetime_days * 86400)
-        
+        # 检查最大绝对有效期
+        max_absolute_expiry = token_data["first_issued_at"] + (max_absolute_lifetime_days * 86400)
         if now > max_absolute_expiry:
-            self._logger.warning(f"刷新令牌已超过最大绝对有效期({max_absolute_lifetime_days}天)")
             return Result.fail(f"刷新令牌已超过最大有效期({max_absolute_lifetime_days}天)，请重新登录")
         
-        # 2. 再检查是否已过期
-        if now > token_claims.exp:
-            self._logger.warning(f"刷新令牌已过期: {user_id}:{device_id}")
+        # 检查是否已过期
+        if now > token_data["exp"]:
             return Result.fail("刷新令牌已过期")
         
-        # 延长有效期，但不超过最大绝对有效期
+        # 延长有效期
         new_exp = now + (REFRESH_TOKEN_EXPIRE_DAYS * 86400)
-        token_claims.exp = min(new_exp, max_absolute_expiry)
-        self._cache.put(token_key, token_claims)
+        token_data["exp"] = min(new_exp, max_absolute_expiry)
+        self._cache.put(token_key, token_data)
         
-        self._logger.info(f"已延长刷新令牌有效期: {user_id}, 新过期时间: {datetime.fromtimestamp(token_claims.exp)}")
         return Result.ok(data=True, message="刷新令牌有效期已延长")
+
+    def get_refresh_token_data(self, user_id: str, device_id: str) -> Optional[Dict[str, Any]]:
+        """获取刷新令牌的原始数据
+        
+        返回字典格式的刷新令牌数据，方便测试和内部使用
+        """
+        token_key = TokenClaims.get_refresh_token_key(user_id, device_id)
+        token_data = self._cache.get(token_key)
+        
+        # 兼容处理，保证返回字典
+        if isinstance(token_data, TokenClaims):
+            return token_data.model_dump()
+        elif isinstance(token_data, dict):
+            return token_data
+        return None
