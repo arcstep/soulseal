@@ -29,7 +29,7 @@ def _parse_args():
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("SOULSEAL_PORT", "8000")),
+        default=int(os.environ.get("SOULSEAL_PORT", "8001")),
         help="端口号"
     )
     parser.add_argument(
@@ -41,7 +41,10 @@ def _parse_args():
     parser.add_argument(
         "--cors-origins",
         type=str,
-        default=os.environ.get("SOULSEAL_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"),
+        default=os.environ.get(
+            "SOULSEAL_CORS_ORIGINS",
+            "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
+        ),
         help="CORS源列表，用逗号分隔"
     )
 

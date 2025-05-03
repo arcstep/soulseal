@@ -1,36 +1,43 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SoulSeal UI
 
-## Getting Started
+SoulSeal的前端界面，基于Next.js构建。
 
-First, run the development server:
+## 开发环境设置
 
+### 安装依赖
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+yarn install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 启动开发服务器
+```bash
+# 直接启动开发服务器
+yarn dev
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+# 或使用自定义脚本（使用环境变量）
+yarn dev:custom
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 构建和部署
+```bash
+# 构建Next.js应用并部署到后端静态目录
+yarn deploy
+```
 
-## Learn More
+## 跨域开发
 
-To learn more about Next.js, take a look at the following resources:
+项目配置为在开发过程中支持跨域请求:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- 前端运行在 http://localhost:3001
+- 后端运行在 http://localhost:8001
+- Next.js的API路由请求会自动代理到后端API
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 环境变量
 
-## Deploy on Vercel
+项目使用以下环境变量:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- `NEXT_PUBLIC_API_BASE_URL`: 客户端API请求的基础URL
+- `API_BASE_URL`: 服务器端API请求的基础URL
+- `PORT`: 开发服务器端口（默认3001）
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+这些变量在`.env.development`和`.env.production`文件中设置。
