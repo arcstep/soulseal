@@ -246,7 +246,7 @@ class TestAuthEndpoints:
         assert result["user"]["username"] == registered_user["user_data"]["username"]
         
         # 验证令牌类型
-        assert result["token_type"] == "cookie"
+        assert result["token_type"] == "bearer"
         
         # 验证Authorization头部包含令牌
         assert "Authorization" in response.headers
@@ -444,6 +444,62 @@ class TestAuthEndpoints:
         # 验证错误信息
         assert "detail" in result
         assert "令牌不存在" in result["detail"] or "认证失败" in result["detail"]
+
+    def test_logout_revokes_refresh_token(self, client, registered_user):
+        """测试退出登录后刷新令牌被撤销
+        
+        验证:
+        1. 退出登录应撤销刷新令牌
+        2. 退出后尝试刷新令牌应失败
+        3. 退出后访问受保护路由应返回401
+        """
+        # 1. 先登录获取令牌和HTTP-only cookie
+        login_response = client.post(
+            "/api/auth/login",
+            json={
+                "username": registered_user["user_data"]["username"],
+                "password": registered_user["user_data"]["password"]
+            }
+        )
+        
+        # 验证登录成功
+        assert login_response.status_code == 200
+        assert "refresh_token" in login_response.cookies
+        
+        # 从Authorization头中保存访问令牌，用于后续测试
+        auth_header = login_response.headers.get("Authorization", "")
+        assert auth_header.startswith("Bearer "), "授权头应该包含令牌"
+        access_token = auth_header.split(" ")[1]
+        
+        # 2. 执行退出登录
+        logout_response = client.post(
+            "/api/auth/logout",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        
+        # 验证退出成功
+        assert logout_response.status_code == 200
+        
+        # 3. 尝试使用退出后的cookie刷新令牌
+        refresh_response = client.post(
+            "/api/auth/refresh-token",
+            headers={"Accept": "application/json"}
+        )
+        
+        # 验证刷新失败
+        assert refresh_response.status_code == 401
+        result = refresh_response.json()
+        assert "detail" in result
+        assert "找不到刷新令牌" in result["detail"] or "令牌不存在" in result["detail"] or "令牌已被撤销" in result["detail"]
+        
+        # 4. 尝试使用原访问令牌访问受保护路由
+        profile_response = client.get(
+            "/api/auth/profile",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        
+        # 验证访问被拒绝
+        assert profile_response.status_code == 401
 
 
 @pytest.fixture
@@ -724,6 +780,57 @@ class TestTokenRefreshFlow:
                 # 验证请求成功且没有触发令牌续订
                 assert response.status_code == 200
                 mock_renew.assert_not_called()
+
+    def test_unauthorized_access_redirects_to_login(self, client):
+        """测试未登录状态访问受保护路由
+        
+        验证:
+        1. 未登录状态下尝试刷新令牌应失败
+        2. 访问需要认证的页面应返回401，前端据此重定向
+        """
+        # 1. 尝试刷新令牌（未登录状态，没有刷新令牌cookie）
+        refresh_response = client.post(
+            "/api/auth/refresh-token",
+            headers={"Accept": "application/json"}
+        )
+        
+        # 验证刷新失败
+        assert refresh_response.status_code == 401
+        result = refresh_response.json()
+        assert "detail" in result
+        assert "找不到刷新令牌" in result["detail"] or "令牌不存在" in result["detail"]
+        
+        # 2. 访问受保护的路由
+        profile_response = client.get("/api/auth/profile")
+        
+        # 验证请求返回401，前端据此重定向到登录页
+        assert profile_response.status_code == 401
+
+    def test_refresh_token_after_login(self, client, registered_user):
+        """测试登录后切换页面时的令牌刷新"""
+        # 1. 先登录获取令牌和HTTP-only cookie
+        login_response = client.post(
+            "/api/auth/login",
+            json={
+                "username": registered_user["user_data"]["username"],
+                "password": registered_user["user_data"]["password"]
+            }
+        )
+        
+        # 验证登录成功
+        assert login_response.status_code == 200
+        
+        # 2. 移除Authorization头，模拟切换页面时内存中的令牌丢失
+        client.headers.clear()
+        
+        # 3. 尝试刷新令牌 - cookie应该自动被发送，不需要手动传递
+        refresh_response = client.post(
+            "/api/auth/refresh-token",
+            headers={"Accept": "application/json"}
+        )
+        
+        # 如果这里失败，说明后端实现有问题，需要修复后端而不是修改测试
+        assert refresh_response.status_code == 200
 
 
 class TestRequireUserDecorator:

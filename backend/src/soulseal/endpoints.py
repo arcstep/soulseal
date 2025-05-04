@@ -144,9 +144,11 @@ def create_auth_endpoints(
                 detail=result.error
             )
 
-        # 直接返回用户信息和token_type，不再根据token_storage_method判断
+        # 修改：返回 JSON 中包括 access_token 和用户基本信息
+        access_token = result.data.get("access_token")
         return {
-            "token_type": "cookie", # 假设默认使用cookie
+            "access_token": access_token,
+            "token_type": "bearer",
             "user": user_info
         }
 
@@ -307,14 +309,23 @@ def create_auth_endpoints(
                 detail=result.error
             )
         
-        # 简化响应逻辑
         if request.headers.get("accept", "").find("application/json") >= 0:
-            # API请求，始终返回消息
             resp_data = {"message": "访问令牌刷新成功"}
-            # 如果结果中有access_token，也一并返回
             if "access_token" in result.data:
-                resp_data["access_token"] = result.data["access_token"]
+                access_token = result.data["access_token"]
+                resp_data["access_token"] = access_token
                 resp_data["token_type"] = "bearer"
+                # 添加最新用户信息
+                payload = TokenClaims.jwt_decode(access_token, verify_exp=False)
+                user = users_manager.get_user(payload.get("user_id"))
+                if user:
+                    user_data = user.model_dump(exclude={"password_hash"})
+                    if "display_name" not in user_data:
+                        user_data["display_name"] = user_data.get("username", "")
+                    if "bio" not in user_data:
+                        user_data["bio"] = ""
+                    user_data["device_id"] = payload.get("device_id")
+                    resp_data["user"] = user_data
             return resp_data
         else:
             # 浏览器请求，只返回成功消息

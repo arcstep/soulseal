@@ -80,10 +80,19 @@ class TokensManager:
         token_data = self._cache.get(token_key)
         
         if token_data:
-            # 直接修改字典过期时间
-            token_data["exp"] = token_data.get("iat", get_current_timestamp())
+            # 将过期时间设置为过去时间，确保令牌立即失效
+            # 使用统一的时间函数，设为一天前
+            past_time = get_current_timestamp() - 86400
+            token_data["exp"] = past_time
             self._cache.put(token_key, token_data)
             self._logger.info(f"刷新令牌已撤销: {token_key}")
+            
+            # 添加到黑名单，双重保险
+            token_id = f"{user_id}:{device_id}"
+            if hasattr(self, '_token_blacklist'):
+                # 使用统一的时间函数计算过期时间
+                expires_at = get_expires_timestamp(days=30)
+                self._token_blacklist.add(token_id, expires_at)
     
     def refresh_access_token(self, user_id: str, username: str, roles: List[str], device_id: str) -> Result[Dict[str, Any]]:
         """使用刷新令牌创建新的访问令牌"""

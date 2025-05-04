@@ -14,14 +14,6 @@ yarn install
 # 直接启动开发服务器
 yarn dev
 
-# 或使用自定义脚本（使用环境变量）
-yarn dev:custom
-```
-
-### 构建和部署
-```bash
-# 构建Next.js应用并部署到后端静态目录
-yarn deploy
 ```
 
 ## 跨域开发

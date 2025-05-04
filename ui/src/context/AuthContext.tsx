@@ -25,78 +25,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const setToken = (newToken: string | null) => {
         setTokenState(newToken);
-        if (newToken) {
-            localStorage.setItem('auth_token', newToken);
-        } else {
-            localStorage.removeItem('auth_token');
-        }
     };
 
-    // 在客户端初始化时从localStorage加载令牌
     useEffect(() => {
-        const storedToken = localStorage.getItem('auth_token');
-        if (storedToken) {
-            setTokenState(storedToken);
-            fetchUserInfo(storedToken);
-        } else {
-            setIsLoading(false);
-        }
+        const refreshAccessToken = async () => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/auth/refresh-token`, {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/json' },
+                    credentials: 'include'
+                });
+                if (!response.ok) {
+                    throw new Error('刷新令牌失败');
+                }
+                const data = await response.json();
+                setTokenState(data.access_token);
+                setUser(data.user);
+            } catch (error) {
+                console.error('刷新令牌失败:', error);
+            } finally {
+                setIsLoading(false);
+            }
+        };
+        refreshAccessToken();
     }, []);
 
-    // 获取用户信息
-    const fetchUserInfo = async (currentToken: string) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/auth/profile`, {
-                headers: {
-                    'Authorization': `Bearer ${currentToken}`
-                },
-                credentials: 'include'
-            });
-
-            if (response.ok) {
-                const userData = await response.json();
-                setUser(userData);
-            } else {
-                // 如果获取用户信息失败，清除令牌
-                setToken(null);
-            }
-        } catch (error) {
-            console.error('获取用户信息失败:', error);
-            setToken(null);
-        } finally {
-            setIsLoading(false);
-        }
-    };
-
-    // 登录函数
     const login = async (username: string, password: string) => {
         setIsLoading(true);
         try {
             const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username, password }),
                 credentials: 'include'
             });
-
             if (!response.ok) {
                 const errorData = await response.json();
                 throw new Error(errorData.detail || '登录失败');
             }
-
             const data = await response.json();
-            const authHeader = response.headers.get('Authorization');
-
-            if (authHeader?.startsWith('Bearer ')) {
-                const accessToken = authHeader.substring(7);
-                setToken(accessToken);
-                setUser(data.user);
-                router.push('/dashboard'); // 登录成功后跳转到仪表板
-            } else {
-                throw new Error('未收到有效的认证令牌');
-            }
+            const accessToken = data.access_token;
+            setToken(accessToken);
+            setUser(data.user);
+            router.push('/dashboard');
         } catch (error: any) {
             console.error('登录失败:', error);
             throw error;
@@ -105,7 +76,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
     };
 
-    // 登出函数
     const logout = async () => {
         try {
             await fetch(`${API_BASE_URL}/api/auth/logout`, {

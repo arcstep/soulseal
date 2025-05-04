@@ -11,7 +11,7 @@ import jwt
 from ..users import UserRole
 from ..schemas import Result
 from .token_schemas import (
-    TokenType, TokenClaims, TokenResult
+    TokenType, TokenClaims, TokenResult, get_current_timestamp, REFRESH_TOKEN_EXPIRE_DAYS
 )
 from .blacklist import TokenBlacklistProvider, MemoryTokenBlacklist
 from .tokens_manager import TokensManager
@@ -241,14 +241,14 @@ class TokenSDK:
                     # 刷新令牌设置到cookie
                     if hasattr(response, "set_cookie"):
                         # 刷新令牌默认过期时间
-                        from .token_schemas import REFRESH_TOKEN_EXPIRE_DAYS
                         refresh_max_age = max_age or REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+                        https_enabled = os.getenv("HTTPS_ENABLED", "false").lower() == "true"
                         
                         response.set_cookie(
                             key="refresh_token",
                             value=token,
                             httponly=True,
-                            secure=True,  # 生产环境保持True
+                            secure=https_enabled,
                             samesite="Lax",
                             max_age=refresh_max_age
                         )
@@ -287,141 +287,89 @@ class TokenSDK:
         
         优化的令牌刷新流程:
         1. 尝试从请求中提取刷新令牌
-        2. 如果找到刷新令牌，直接用它刷新访问令牌
-        3. 如果未找到刷新令牌，尝试从过期的访问令牌中提取信息并刷新
-        4. 将新访问令牌设置到响应头，将新刷新令牌（如果有）设置到cookie
+        2. 检查令牌有效性和黑名单状态
+        3. 创建新的访问令牌并返回
         """
         # 首先尝试获取刷新令牌
         refresh_token = self.extract_token_from_request(request, "refresh")
         
-        # 如果找到了刷新令牌，直接使用它
-        if refresh_token:
-            try:
-                # 使用TokenClaims的解码方法
-                refresh_data = TokenClaims.jwt_decode(refresh_token, verify_exp=False)
-                
-                user_id = refresh_data.get("user_id")
-                device_id = refresh_data.get("device_id")
-                username = refresh_data.get("username")
-                roles = refresh_data.get("roles")
-                
-                if not all([user_id, device_id, username, roles]):
-                    return Result.fail("刷新令牌格式无效")
-                
-                # 验证刷新令牌是否过期
-                try:
-                    TokenClaims.jwt_decode(refresh_token, verify_exp=True)
-                    
-                    # 刷新令牌有效，延长其有效期
-                    if self._auth_server and self._tokens_manager:
-                        extend_result = self.extend_refresh_token(user_id, device_id)
-                        if extend_result.is_ok():
-                            self._logger.debug(f"自动续订刷新令牌成功: {user_id}")
-                        else:
-                            self._logger.warning(f"自动续订刷新令牌失败: {extend_result.error}")
-                    
-                    # 创建新的访问令牌
-                    access_token = self._create_token(user_id, username, roles, device_id)
-                    
-                    # 将访问令牌设置到header
-                    self.set_token_to_response(response, access_token, "access")
-                    
-                    # 获取刷新令牌并设置到Cookie
-                    refresh_token = TokenClaims.jwt_encode_payload(refresh_data)
-                    self.set_token_to_response(response, refresh_token, "refresh")
-
-                    # 返回成功结果
-                    return Result.ok(
-                        data={
-                            "access_token": access_token,
-                            "user_id": user_id,
-                            "username": username,
-                            "roles": roles,
-                            "device_id": device_id,
-                            "token_type": "access"
-                        },
-                        message="使用刷新令牌创建新的访问令牌成功"
-                    )
-                    
-                except jwt.ExpiredSignatureError:
-                    # 刷新令牌已过期，需要重新登录
-                    return Result.fail("刷新令牌已过期，请重新登录")
-                    
-            except Exception as e:
-                self._logger.error(f"处理刷新令牌错误: {str(e)}")
-        
-        # 如果没有找到刷新令牌或刷新失败，尝试获取并解析访问令牌
-        access_token = self.extract_token_from_request(request, "access")
-        if not access_token:
-            return Result.fail("访问令牌和刷新令牌都不存在，请重新登录")
+        # 如果没有找到刷新令牌，直接返回错误
+        if not refresh_token:
+            error_msg = "找不到刷新令牌"
+            self._logger.error(error_msg)
+            return Result.fail(error_msg)
         
         try:
-            # 解析访问令牌但不验证过期时间
-            unverified = TokenClaims.jwt_decode(
-                access_token,
-                verify_exp=False,
-                verify_signature=False
+            # 解码令牌（不验证过期时间）获取基本信息
+            refresh_data = TokenClaims.jwt_decode(refresh_token, verify_exp=False)
+            
+            user_id = refresh_data.get("user_id")
+            device_id = refresh_data.get("device_id")
+            username = refresh_data.get("username")
+            roles = refresh_data.get("roles")
+            
+            # 检查基本字段是否存在
+            if not all([user_id, device_id, username, roles]):
+                return Result.fail("刷新令牌格式无效")
+            
+            # 检查令牌是否在黑名单中
+            token_id = f"{user_id}:{device_id}"
+            if self._blacklist and self._blacklist.contains(token_id):
+                self._logger.warning(f"刷新令牌已被撤销: {token_id}")
+                return Result.fail("刷新令牌已被撤销，请重新登录")
+            
+            # 先检查数据库中的令牌状态
+            if self._auth_server and self._tokens_manager:
+                token_data = self._tokens_manager.get_refresh_token_data(user_id, device_id)
+                if not token_data:
+                    self._logger.warning(f"数据库中无此刷新令牌记录: {token_id}")
+                    return Result.fail("刷新令牌无效，请重新登录")
+                
+                # 使用统一的时间获取函数
+                now = get_current_timestamp()
+                if token_data.get("exp", 0) <= now:
+                    self._logger.warning(f"数据库中的刷新令牌已过期: {token_id}")
+                    return Result.fail("刷新令牌已过期，请重新登录")
+            
+            # 验证JWT本身是否过期
+            try:
+                TokenClaims.jwt_decode(refresh_token, verify_exp=True)
+            except jwt.ExpiredSignatureError:
+                self._logger.warning(f"刷新令牌JWT已过期: {token_id}")
+                return Result.fail("刷新令牌已过期，请重新登录")
+            
+            # 刷新令牌有效，延长其有效期
+            if self._auth_server and self._tokens_manager:
+                extend_result = self.extend_refresh_token(user_id, device_id)
+                if extend_result.is_fail():
+                    self._logger.warning(f"延长刷新令牌有效期失败: {extend_result.error}")
+                    # 尽管续期失败，但不阻止本次令牌刷新
+            
+            # 创建新的访问令牌
+            access_token = self._create_token(user_id, username, roles, device_id)
+            
+            # 将访问令牌设置到header
+            self.set_token_to_response(response, access_token, "access")
+            
+            # 将刷新令牌设置回Cookie
+            self.set_token_to_response(response, refresh_token, "refresh")
+            
+            # 返回成功结果
+            return Result.ok(
+                data={
+                    "access_token": access_token,
+                    "user_id": user_id,
+                    "username": username,
+                    "roles": roles,
+                    "device_id": device_id,
+                    "token_type": "access"
+                },
+                message="使用刷新令牌创建新的访问令牌成功"
             )
             
-            user_id = unverified.get("user_id")
-            device_id = unverified.get("device_id")
-            username = unverified.get("username")
-            roles = unverified.get("roles")
-            
-            if not all([user_id, device_id, username, roles]):
-                return Result.fail("令牌格式无效")
-            
-            # 验证令牌是否已过期
-            try:
-                TokenClaims.jwt_decode(
-                    access_token,
-                    verify_exp=True
-                )
-                # 令牌未过期，不需要刷新
-                return Result.ok(
-                    data={
-                        "access_token": access_token,
-                        **unverified
-                    }, 
-                    message="令牌有效，无需刷新"
-                )
-            except jwt.ExpiredSignatureError:
-                # 令牌已过期，尝试使用数据库中的刷新令牌
-                if not self._auth_server or not self._tokens_manager:
-                    return Result.fail("无法刷新令牌，请重新登录")
-                
-                self._logger.info(f"访问令牌已过期，尝试使用数据库刷新令牌: {user_id}")
-                
-                # 使用TokensManager刷新令牌
-                refresh_result = self._tokens_manager.refresh_access_token(
-                    user_id=user_id,
-                    username=username,
-                    roles=roles,
-                    device_id=device_id
-                )
-                
-                if refresh_result.is_ok():
-                    # 刷新成功，获取新令牌
-                    new_token_data = refresh_result.data
-                    if isinstance(new_token_data, dict) and "access_token" in new_token_data:
-                        new_token = new_token_data["access_token"]
-                        
-                        # 将访问令牌设置到header
-                        self.set_token_to_response(response, new_token, "access")
-                            
-                        # 获取刷新令牌并设置到Cookie
-                        refresh_token_claims = refresh_result.data
-                        refresh_token = TokenClaims.jwt_encode_payload(refresh_token_claims)
-                        self.set_token_to_response(response, refresh_token, "refresh")
-                        
-                        return Result.ok(data=new_token_data, message="访问令牌已刷新")
-                
-                # 记录刷新失败
-                self._logger.error(f"刷新令牌失败: {refresh_result.error if hasattr(refresh_result, 'error') else '未知错误'}")
-                return refresh_result
-                
         except Exception as e:
-            error_msg = f"处理令牌刷新失败: {str(e)}"
+            # 捕获所有其他异常并返回错误
+            error_msg = f"刷新令牌处理失败: {str(e)}"
             self._logger.error(error_msg)
             return Result.fail(error_msg)
 
